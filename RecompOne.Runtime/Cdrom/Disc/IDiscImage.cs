@@ -3,10 +3,10 @@ namespace RecompOne.Runtime.Cdrom;
 public enum DiscTrackKind
 {
     Data,
-    Audio,
+    Audio
 }
 
-public readonly record struct DiscTrack(int Number, DiscTrackKind Kind, int StartLba, int SectorSize);
+public readonly record struct DiscTrack(int Number, DiscTrackKind Kind, int StartLba, int SectorSize, int PregapLba);
 
 public interface IDiscImage : IDisposable
 {
@@ -28,5 +28,10 @@ public interface IDiscImage : IDisposable
 
     byte[] ReadSectorData(int lba, int size);
 
-    byte[] ReadSector(int lba) => ReadSectorData(lba, 2048);
+    byte[] ReadRawSector(int lba);
+
+    byte[] ReadSector(int lba)
+    {
+        return ReadSectorData(lba, 2048);
+    }
 }

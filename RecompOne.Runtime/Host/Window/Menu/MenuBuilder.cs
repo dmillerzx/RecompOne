@@ -2,14 +2,12 @@ namespace RecompOne.Runtime.Host.Window;
 
 public sealed class MenuBuilder
 {
-    public const int OrderStep = 10;
+    private readonly MenuNode _node;
+    private readonly MenuBuilder? _parent;
 
-    readonly MenuNode _node;
-    readonly MenuBuilder? _parent;
-
-    MenuEntry? _last;
-    MenuItemEntry? _lastItem;
-    MenuNode? _lastNode;
+    private MenuEntry? _last;
+    private MenuItemEntry? _lastItem;
+    private MenuNode? _lastNode;
 
     internal MenuBuilder(MenuNode node, MenuBuilder? parent)
     {
@@ -27,7 +25,7 @@ public sealed class MenuBuilder
         _lastItem = new MenuItemEntry(labelKey, onClick) { Shortcut = shortcut };
         _lastNode = null;
         _last = _lastItem;
-        Add(_lastItem);
+        _node.Add(_lastItem);
         return this;
     }
 
@@ -42,7 +40,10 @@ public sealed class MenuBuilder
     {
         return Check(labelKey,
             () => PanelManager.Get<T>()?.IsOpen == true,
-            open => { if (PanelManager.Get<T>() is { } panel) panel.IsOpen = open; });
+            open =>
+            {
+                if (PanelManager.Get<T>() is { } panel) panel.IsOpen = open;
+            });
     }
 
     public MenuBuilder Popup<T>(string labelKey) where T : Popup
@@ -50,7 +51,10 @@ public sealed class MenuBuilder
         return Item(labelKey, PopupManager.Open<T>);
     }
 
-    public MenuBuilder Label(string labelKey) => Text(() => Localization.T(labelKey));
+    public MenuBuilder Label(string labelKey)
+    {
+        return Text(() => Localization.T(labelKey));
+    }
 
     public MenuBuilder Text(Func<string> text)
     {
@@ -58,9 +62,9 @@ public sealed class MenuBuilder
         return this;
     }
 
-    public MenuBuilder Separator()
+    public MenuBuilder Separator(string? key = null)
     {
-        Track(new MenuSeparatorEntry());
+        Track(new MenuSeparatorEntry { Key = key });
         return this;
     }
 
@@ -70,27 +74,39 @@ public sealed class MenuBuilder
         return this;
     }
 
-    public MenuBuilder Submenu(string labelKey) => new(_node.Submenu(labelKey), this);
-
-    void Track(MenuEntry entry)
+    public MenuBuilder Submenu(string labelKey)
     {
-        _lastItem = null;
-        _lastNode = null;
-        _last = entry;
-        Add(entry);
+        return new MenuBuilder(_node.Submenu(labelKey), this);
     }
 
-    public MenuBuilder End() => _parent ?? this;
-
-    public MenuBuilder Order(int order)
+    //the idea is, you can render this before or after a menu label, its better than weird indexing by id
+    public MenuBuilder After(string labelKey)
     {
-        if (_last == null) return this;
-        if (_last == _node) _parent?.ReorderChild(_node, order);
-        else _node.Reorder(_last, order);
+        return Anchor(labelKey, false);
+    }
+
+    public MenuBuilder Before(string labelKey)
+    {
+        return Anchor(labelKey, true);
+    }
+
+    private MenuBuilder Anchor(string labelKey, bool before) //places the ancho on it
+    {
+        var target = _last ?? _node;
+        target.AnchorKey = labelKey;
+        target.AnchorBefore = before;
+
+        if (target != _node) _node.Invalidate();
+        else if (_parent != null) _parent.Invalidate();
+        else MenuRegistry.Invalidate();
+
         return this;
     }
 
-    internal void ReorderChild(MenuNode child, int order) => _node.Reorder(child, order);
+    public MenuBuilder End()
+    {
+        return _parent ?? this;
+    }
 
     public MenuBuilder Enabled(Func<bool> predicate)
     {
@@ -99,7 +115,10 @@ public sealed class MenuBuilder
         return this;
     }
 
-    public MenuBuilder Disabled() => Enabled(static () => false);
+    public MenuBuilder Disabled()
+    {
+        return Enabled(static () => false);
+    }
 
     public MenuBuilder Tooltip(string tooltipKey)
     {
@@ -108,9 +127,16 @@ public sealed class MenuBuilder
         return this;
     }
 
-    void Add(MenuEntry entry)
+    internal void Invalidate()
     {
-        entry.Order = _node.NextOrder();
+        _node.Invalidate();
+    }
+
+    private void Track(MenuEntry entry)
+    {
+        _lastItem = null;
+        _lastNode = null;
+        _last = entry;
         _node.Add(entry);
     }
 }

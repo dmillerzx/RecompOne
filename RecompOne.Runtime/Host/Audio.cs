@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Threading;
 using RecompOne.Runtime.Hardware;
 #if !ANDROID
@@ -81,8 +81,8 @@ public static unsafe class Audio
     {
         if (spu == null) return;
         _spu = spu;
-        spu.VoiceGain = Config.ConfigManager.Game.SpuVolume;
-        spu.XaGain = Config.ConfigManager.Game.XaVolume;
+        spu.VoiceGain = Config.Settings.System.Audio.Spu;
+        spu.XaGain = Config.Settings.System.Audio.Xa;
     }
 
     // Mirrors the desktop backend: the mixer loop keeps running, it just stops
@@ -152,23 +152,33 @@ public static unsafe class Audio
         }
         catch { }
     }
+
+    // The asset-pack preview tools are desktop-only UI; nothing on Android calls these, but
+    // the tool sources are still compiled for the Android target.
+    public static void Preview(short[] pcm, int channels, int rate) { }
+    public static void StopPreview() { }
+    public static bool PreviewPlaying => false;
 #else
-    static ALContext? _alc;
-    static AL? _al;
-    static ALDevice* _device;
-    static ALCtx* _context;
+    private static ALContext? _alc;
+    private static AL? _al;
+    private static ALDevice* _device;
+    private static ALCtx* _context;
 
-    const int NumBuffers = 8;
-    const int FramesPerBuffer = 256;
 
-    static uint _source;
-    static uint[] _buffers = new uint[NumBuffers];
-    static short[] _sampleBuf = new short[FramesPerBuffer * 2];
+    private const int NumBuffers = 8;
+    private const int FramesPerBuffer = 256;
 
-    static Thread? _mixerThread;
-    static Spu? _spu;
-    static volatile bool _running;
-    static float _masterVolume = 1.0f;
+    private static uint _source;
+    private static uint _previewSource;
+    private static uint _previewBuffer;
+    private static readonly object _previewGate = new();
+    private static uint[] _buffers = new uint[NumBuffers];
+    private static short[] _sampleBuf = new short[FramesPerBuffer * 2];
+
+    private static Thread? _mixerThread;
+    private static Spu? _spu;
+    private static volatile bool _running;
+    private static float _masterVolume = 1.0f;
 
     public static void Initialize()
     {
@@ -182,18 +192,22 @@ public static unsafe class Audio
                 Console.Error.WriteLine("[Host] no audio device, audio disabled");
                 return;
             }
+
             _context = _alc.CreateContext(_device, null);
             _alc.MakeContextCurrent(_context);
 
             _source = _al.GenSource();
             _al.SetSourceProperty(_source, SourceFloat.Gain, _masterVolume);
             fixed (uint* ptr = _buffers)
+            {
                 _al.GenBuffers(NumBuffers, ptr);
+            }
 
-            for (int i = 0; i < _buffers.Length; i++)
+            //initial empty rihgt
+            for (var i = 0; i < _buffers.Length; i++)
             {
                 _al.BufferData(_buffers[i], BufferFormat.Stereo16, _sampleBuf, 44100);
-                uint b = _buffers[i];
+                var b = _buffers[i];
                 _al.SourceQueueBuffers(_source, 1, &b);
             }
 
@@ -213,11 +227,61 @@ public static unsafe class Audio
     {
         if (spu == null) return;
         _spu = spu;
-        spu.VoiceGain = Config.ConfigManager.Game.SpuVolume;
-        spu.XaGain = Config.ConfigManager.Game.XaVolume;
+        spu.VoiceGain = Config.Settings.System.Audio.Spu;
+        spu.XaGain = Config.Settings.System.Audio.Xa;
     }
 
-    public static void Detach() => _spu = null;
+    public static void Detach()
+    {
+        _spu = null;
+    }
+
+    public static void Preview(short[] pcm, int channels, int rate)
+    {
+        if (_al == null || pcm.Length == 0) return;
+
+        lock (_previewGate)
+        {
+            StopPreviewLocked();
+            if (_previewSource == 0) _previewSource = _al.GenSource();
+            _previewBuffer = _al.GenBuffer();
+            _al.BufferData(_previewBuffer, channels >= 2 ? BufferFormat.Stereo16 : BufferFormat.Mono16, pcm, rate);
+            _al.SetSourceProperty(_previewSource, SourceFloat.Gain, _masterVolume);
+            _al.SetSourceProperty(_previewSource, SourceInteger.Buffer, (int)_previewBuffer);
+            _al.SourcePlay(_previewSource);
+        }
+    }
+
+    public static void StopPreview()
+    {
+        if (_al == null) return;
+        lock (_previewGate)
+        {
+            StopPreviewLocked();
+        }
+    }
+
+    public static bool PreviewPlaying
+    {
+        get
+        {
+            if (_al == null || _previewSource == 0) return false;
+            lock (_previewGate)
+            {
+                _al.GetSourceProperty(_previewSource, GetSourceInteger.SourceState, out var state);
+                return state == (int)SourceState.Playing;
+            }
+        }
+    }
+
+    private static void StopPreviewLocked()
+    {
+        if (_previewSource == 0) return;
+        _al!.SourceStop(_previewSource);
+        _al.SetSourceProperty(_previewSource, SourceInteger.Buffer, 0);
+        if (_previewBuffer != 0) _al.DeleteBuffer(_previewBuffer);
+        _previewBuffer = 0;
+    }
 
     public static void SetMasterVolume(float volume)
     {
@@ -226,19 +290,21 @@ public static unsafe class Audio
             _al.SetSourceProperty(_source, SourceFloat.Gain, _masterVolume);
     }
 
-    static void MixerLoop()
+    private static readonly int BufferMs = Math.Max(1, FramesPerBuffer * 1000 / 44100);
+
+    private static void MixerLoop()
     {
         while (_running)
         {
             var spu = _spu;
             if (spu != null) FillBuffers(spu);
-            Thread.Sleep(3);
+            Thread.Sleep(spu != null ? BufferMs : 20);
         }
     }
 
-    static void FillBuffers(Spu spu)
+    private static void FillBuffers(Spu spu)
     {
-        _al!.GetSourceProperty(_source, GetSourceInteger.BuffersProcessed, out int processed);
+        _al!.GetSourceProperty(_source, GetSourceInteger.BuffersProcessed, out var processed);
         while (processed > 0)
         {
             uint buf = 0;
@@ -251,7 +317,7 @@ public static unsafe class Audio
             processed--;
         }
 
-        _al.GetSourceProperty(_source, GetSourceInteger.SourceState, out int state);
+        _al.GetSourceProperty(_source, GetSourceInteger.SourceState, out var state);
         if (state != (int)SourceState.Playing)
             _al.SourcePlay(_source);
     }
@@ -263,10 +329,13 @@ public static unsafe class Audio
         _mixerThread?.Join();
         if (_al != null)
         {
+            StopPreview();
+            if (_previewSource != 0) _al.DeleteSource(_previewSource);
             _al.SourceStop(_source);
             _al.DeleteSource(_source);
             _al.DeleteBuffers(_buffers);
         }
+
         if (_context != null) _alc.DestroyContext(_context);
         if (_device != null) _alc.CloseDevice(_device);
     }

@@ -9,14 +9,17 @@ public sealed class CueBinImage : IDiscImage
         int SectorSize,
         int DataOffset,
         long FileOffset,
-        int StartLba);
+        int StartLba,
+        int PregapLba);
 
     private readonly List<Track> _tracks = [];
     private readonly Dictionary<string, FileStream> _files = [];
     private readonly object _ioGate = new();
     private int _lastOobLba = int.MinValue;
 
-    private CueBinImage() { }
+    private CueBinImage()
+    {
+    }
 
     public static CueBinImage Open(string cuePath)
     {
@@ -34,7 +37,7 @@ public sealed class CueBinImage : IDiscImage
     public bool HasTracks => _tracks.Count > 0;
 
     public IReadOnlyList<DiscTrack> Tracks => _tracks
-        .Select(t => new DiscTrack(t.Number, KindOf(t.Mode), t.StartLba, t.SectorSize))
+        .Select(t => new DiscTrack(t.Number, KindOf(t.Mode), t.StartLba, t.SectorSize, t.PregapLba))
         .ToList();
 
     public int LeadoutLba
@@ -45,7 +48,7 @@ public sealed class CueBinImage : IDiscImage
             var seen = new HashSet<string>();
             foreach (var t in _tracks)
                 if (seen.Add(t.BinPath) && File.Exists(t.BinPath))
-                    total += new FileInfo(t.BinPath).Length / 2352;
+                    total += FileLength(t.BinPath) / 2352;
             return (int)total;
         }
     }
@@ -67,6 +70,7 @@ public sealed class CueBinImage : IDiscImage
             lba = 0;
             return false;
         }
+
         lba = t.StartLba;
         return true;
     }
@@ -75,16 +79,16 @@ public sealed class CueBinImage : IDiscImage
     {
         var t = DataTrack();
         var stream = GetStream(t.BinPath);
-        int offset = t.SectorSize == 2352
+        var offset = t.SectorSize == 2352
             ? size switch { >= 2340 => 12, >= 2329 => 16, _ => 24 }
             : t.DataOffset;
-        long pos = t.FileOffset + (long)lba * t.SectorSize + offset;
+        var pos = t.FileOffset + (long)lba * t.SectorSize + offset;
         var buf = new byte[size];
         if (lba < 0) return buf;
-        int want = Math.Min(size, t.SectorSize - offset);
+        var want = Math.Min(size, t.SectorSize - offset);
         lock (_ioGate)
         {
-            int dataSectors = DataTrackSectors(t, stream);
+            var dataSectors = DataTrackSectors(t, stream);
             if (lba >= dataSectors || pos >= stream.Length)
             {
                 if (lba != _lastOobLba)
@@ -92,33 +96,61 @@ public sealed class CueBinImage : IDiscImage
                     _lastOobLba = lba;
                     Console.WriteLine($"[DiscImage] read outside data track: lba={lba}");
                 }
+
                 return buf;
             }
-            int avail = (int)Math.Min(want, stream.Length - pos);
+
+            var avail = (int)Math.Min(want, stream.Length - pos);
             stream.Seek(pos, SeekOrigin.Begin);
             stream.ReadExactly(buf, 0, avail);
         }
+
         return buf;
     }
 
+    public byte[] ReadRawSector(int lba)
+    {
+        var buf = new byte[2352];
+        if (lba < 0) return buf;
+        
+        lock (_ioGate)
+        {
+            foreach (var t in _tracks)
+            {
+                if (t.SectorSize != 2352) continue;
+                var stream = GetStream(t.BinPath);
+                var origin = t.StartLba - (int)(t.FileOffset / t.SectorSize);
+                var frames = (int)(stream.Length / 2352);
+                if (lba < origin || lba >= origin + frames) continue;
+                
+                stream.Seek((long)(lba - origin) * 2352, SeekOrigin.Begin);
+                stream.ReadExactly(buf, 0, 2352);
+                return buf;
+            }
+        }
+        
+        return buf;
+    }
+    
     private void Parse(string cuePath)
     {
-        string dir = Path.GetDirectoryName(Path.GetFullPath(cuePath)) ?? "";
+        var dir = Path.GetDirectoryName(Path.GetFullPath(cuePath)) ?? "";
         string? currentFile = null;
-        int trackNum = 0;
-        string mode = "MODE2/2352";
+        var trackNum = 0;
+        var mode = "MODE2/2352";
         long fileBaseSectors = 0;
+        long? indexZero = null;
 
         foreach (var raw in File.ReadLines(cuePath))
         {
             var line = raw.Trim();
             if (line.StartsWith("FILE ", StringComparison.OrdinalIgnoreCase))
             {
-                int a = line.IndexOf('"') + 1;
-                int b = line.LastIndexOf('"');
-                if (currentFile != null && File.Exists(currentFile))
-                    fileBaseSectors += new FileInfo(currentFile).Length / 2352;
+                var a = line.IndexOf('"') + 1;
+                var b = line.LastIndexOf('"');
+                if (currentFile != null && File.Exists(currentFile)) fileBaseSectors += FileLength(currentFile) / 2352;
                 currentFile = Path.Combine(dir, line[a..b]);
+                indexZero = null;
             }
             else if (line.StartsWith("TRACK ", StringComparison.OrdinalIgnoreCase))
             {
@@ -126,11 +158,15 @@ public sealed class CueBinImage : IDiscImage
                 trackNum = int.Parse(p[1]);
                 mode = p[2];
             }
+            else if (line.StartsWith("INDEX 00 ", StringComparison.OrdinalIgnoreCase))
+            {
+                indexZero = MsfToSectors(line[9..].Trim());
+            }
             else if (line.StartsWith("INDEX 01 ", StringComparison.OrdinalIgnoreCase))
             {
-                long sectorsWithinFile = MsfToSectors(line[9..].Trim());
-                int sectorSize = GetSectorSize(mode);
-                int startLba = (int)(fileBaseSectors + sectorsWithinFile);
+                var sectorsWithinFile = MsfToSectors(line[9..].Trim());
+                var sectorSize = GetSectorSize(mode);
+                var startLba = (int)(fileBaseSectors + sectorsWithinFile);
                 _tracks.Add(new Track(
                     currentFile!,
                     trackNum,
@@ -138,23 +174,35 @@ public sealed class CueBinImage : IDiscImage
                     sectorSize,
                     GetDataOffset(mode),
                     sectorsWithinFile * sectorSize,
-                    startLba));
+                    startLba,
+                    (int)(fileBaseSectors + (indexZero ?? sectorsWithinFile))));
+                indexZero = null;
             }
         }
     }
 
-    private Track DataTrack() =>
-        _tracks.Find(t => KindOf(t.Mode) == DiscTrackKind.Data)
-        ?? throw new InvalidOperationException("no data track was found in cue sheet");
+    private static long FileLength(string path)
+    {
+        using var fs = File.OpenRead(path);
+        return fs.Length;
+    }
+
+    private Track DataTrack()
+    {
+        return _tracks.Find(t => KindOf(t.Mode) == DiscTrackKind.Data)
+               ?? throw new InvalidOperationException("no data track was found in cue sheet");
+    }
 
     private int DataTrackSectors(Track dataTrack, FileStream stream)
     {
-        int next = int.MaxValue;
+        var byFile = (int)((stream.Length - dataTrack.FileOffset) / dataTrack.SectorSize);
+
+        var next = int.MaxValue;
         foreach (var t in _tracks)
-            if (t.StartLba > dataTrack.StartLba && t.StartLba < next) next = t.StartLba;
-        return next != int.MaxValue
-            ? next - dataTrack.StartLba
-            : (int)((stream.Length - dataTrack.FileOffset) / dataTrack.SectorSize);
+            if (t.BinPath == dataTrack.BinPath && t.StartLba > dataTrack.StartLba && t.StartLba < next)
+                next = t.StartLba;
+
+        return next != int.MaxValue ? Math.Min(next - dataTrack.StartLba, byFile) : byFile;
     }
 
     private FileStream GetStream(string path)
@@ -167,8 +215,10 @@ public sealed class CueBinImage : IDiscImage
         }
     }
 
-    private static DiscTrackKind KindOf(string mode) =>
-        mode.Equals("AUDIO", StringComparison.OrdinalIgnoreCase) ? DiscTrackKind.Audio : DiscTrackKind.Data;
+    private static DiscTrackKind KindOf(string mode)
+    {
+        return mode.Equals("AUDIO", StringComparison.OrdinalIgnoreCase) ? DiscTrackKind.Audio : DiscTrackKind.Data;
+    }
 
     private static long MsfToSectors(string msf)
     {
@@ -176,20 +226,26 @@ public sealed class CueBinImage : IDiscImage
         return long.Parse(p[0]) * 60 * 75 + long.Parse(p[1]) * 75 + long.Parse(p[2]);
     }
 
-    private static int GetSectorSize(string mode) => mode switch
+    private static int GetSectorSize(string mode)
     {
-        "MODE1/2048" => 2048,
-        "MODE2/2336" => 2336,
-        _ => 2352,
-    };
+        return mode switch
+        {
+            "MODE1/2048" => 2048,
+            "MODE2/2336" => 2336,
+            _ => 2352
+        };
+    }
 
-    private static int GetDataOffset(string mode) => mode switch
+    private static int GetDataOffset(string mode)
     {
-        "MODE1/2352" => 16,
-        "MODE2/2352" => 24,
-        "MODE2/2336" => 8,
-        _ => 0,
-    };
+        return mode switch
+        {
+            "MODE1/2352" => 16,
+            "MODE2/2352" => 24,
+            "MODE2/2336" => 8,
+            _ => 0
+        };
+    }
 
     public void Dispose()
     {

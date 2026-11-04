@@ -3,7 +3,6 @@ using ImGuiNET;
 using Silk.NET.Input;
 using Silk.NET.Maths;
 using Silk.NET.OpenGL;
-using Silk.NET.OpenGL.Extensions.ImGui;
 using Silk.NET.Windowing;
 using RecompOne.Runtime.Config;
 using RecompOne.Runtime.Hardware;
@@ -13,38 +12,65 @@ namespace RecompOne.Runtime.Host;
 
 public static class HostWindow
 {
-    static IView? _window;
-    static GL? _gl;
-    static ImGuiController? _imgui;
-    static bool _headless;
-    static Gpu? _gpu;
+    private static IView? _window;
+    private static GL? _gl;
+    private static ImGuiController? _imgui;
+    private static bool _headless;
+    private static Gpu? _gpu;
 
-    static uint _displayTex;
-    static uint _vramTex;
-    static uint _ramTex;
-    static Hle.GlCore? _glBackend;
+    private static uint _displayTex;
+    private static uint _vramTex;
+    private static uint _ramTex;
+    private static Hle.GlCore? _glBackend;
 
-    static byte[] _rgbDisplay = [];
-    static byte[] _rgbVram = [];
-    static byte[] _ramFront = new byte[Memory.RamLogger.Width * Memory.RamLogger.Height * 4];
-    static byte[] _ramBack = new byte[Memory.RamLogger.Width * Memory.RamLogger.Height * 4];
-    static Task? _ramTask;
-    static volatile bool _ramReady;
-    static int _ramFrame;
+    private static byte[] _rgbDisplay = [];
+    private static byte[] _rgbVram = [];
+    private static byte[] _ramFront = new byte[Memory.RamLogger.Width * Memory.RamLogger.Height * 4];
+    private static byte[] _ramBack = new byte[Memory.RamLogger.Width * Memory.RamLogger.Height * 4];
+    private static Task? _ramTask;
+    private static volatile bool _ramReady;
+    private static int _ramFrame;
 
-    static bool _layoutPending = true;
-    static bool _closed;
+    private static bool _layoutPending = true;
+    private static bool _closed;
 
-    const int RedockCooldownFrames = 8;
-    static int _redockCooldown;
+    private const int RedockCooldownFrames = 8;
+    private static int _redockCooldown;
 
-    public static void RequestLayout() => _layoutPending = true;
+    public static void RequestLayout()
+    {
+        _layoutPending = true;
+    }
 
-    static float _dpiScale = 1f;
+    public enum AspectRatioMode
+    {
+        AutoDevice = 0,      // Dynamic aspect fit for any device (Portrait & Landscape)
+        Original_4_3 = 1,    // 4:3 PSX ratio
+        Widescreen_16_9 = 2, // 16:9 widescreen
+        Stretch = 3          // Stretch fill
+    }
+
+    public static AspectRatioMode CurrentAspectRatio = AspectRatioMode.AutoDevice;
+    public static volatile bool PendingGpuBackendReset = true;
+
+    public static void RequestGpuReset()
+    {
+        PendingGpuBackendReset = true;
+    }
+
+    static uint _directVao, _directVbo, _directProg;
+    static int _uDirectTex;
+    static float _directUMax = 1.0f;
+
+    // The aspect the game actually rendered this frame, as reported by the backend. Widescreen
+    // makes the frame genuinely wider, so presenting it against a fixed ratio would squash it.
+    static float _directAspect = 4f / 3f;
+
+    private static float _dpiScale = 1f;
 
     public static float DpiScale => _dpiScale;
 
-    static unsafe float QueryDpiScale()
+    private static unsafe float QueryDpiScale()
     {
 #if !ANDROID
         try
@@ -53,8 +79,8 @@ public static class HostWindow
             var monitor = glfw.GetPrimaryMonitor();
             if (monitor != null)
             {
-                glfw.GetMonitorContentScale(monitor, out float xs, out float ys);
-                float s = MathF.Max(xs, ys);
+                glfw.GetMonitorContentScale(monitor, out var xs, out var ys);
+                var s = MathF.Max(xs, ys);
                 if (s >= 0.5f && s <= 8f) return s;
             }
         }
@@ -70,16 +96,18 @@ public static class HostWindow
             var size = _window.Size;
             if (size.X > 0 && fb.X > 0)
             {
-                float s = (float)fb.X / size.X;
+                var s = (float)fb.X / size.X;
                 if (s >= 0.5f && s <= 8f) return s;
             }
         }
-        catch { }
+        catch
+        {
+        }
 
         return 1f;
     }
 
-    static GraphicsAPI[] ApiChain()
+    private static GraphicsAPI[] ApiChain()
     {
 #if ANDROID
         // Android only ever offers GLES, and the desktop fallback chain (4.5 -> 3.3 -> 2.1
@@ -87,51 +115,62 @@ public static class HostWindow
         return [new GraphicsAPI(ContextAPI.OpenGLES, ContextProfile.Core, ContextFlags.Default, new APIVersion(3, 0))];
 #else
         if (OperatingSystem.IsMacOS())
-            return [new GraphicsAPI(ContextAPI.OpenGL, ContextProfile.Core, ContextFlags.ForwardCompatible, new APIVersion(4, 1))];
+            return
+            [
+                new GraphicsAPI(ContextAPI.OpenGL, ContextProfile.Core, ContextFlags.ForwardCompatible,
+                    new APIVersion(4, 1))
+            ];
 
-        var requested = Hle.GpuBackendFactory.Parse(ConfigManager.View.GpuBackend);
-        var core45 = new GraphicsAPI(ContextAPI.OpenGL, ContextProfile.Core, ContextFlags.Default, new APIVersion(4, 5));
-        var core33 = new GraphicsAPI(ContextAPI.OpenGL, ContextProfile.Core, ContextFlags.Default, new APIVersion(3, 3));
-        var compat21 = new GraphicsAPI(ContextAPI.OpenGL, ContextProfile.Compatability, ContextFlags.Default, new APIVersion(2, 1));
+        var requested = Hle.GpuBackendFactory.Parse(DisplayOptions.Backend);
+        var core45 = new GraphicsAPI(ContextAPI.OpenGL, ContextProfile.Core, ContextFlags.Default,
+            new APIVersion(4, 5));
+        var core33 = new GraphicsAPI(ContextAPI.OpenGL, ContextProfile.Core, ContextFlags.Default,
+            new APIVersion(3, 3));
+        var compat21 = new GraphicsAPI(ContextAPI.OpenGL, ContextProfile.Compatability, ContextFlags.Default,
+            new APIVersion(2, 1));
 
         return requested switch
         {
             Hle.GlBackendKind.Gl21 => [compat21],
             Hle.GlBackendKind.Gl33 => [core33, compat21],
-            _ => [core45, core33, compat21],
+            _ => [core45, core33, compat21]
         };
 #endif
     }
 
     public static void Initialize(string title)
     {
-        ConfigManager.Load();
+        Settings.EnsureLoaded();
+        InterfaceLayout.Load();
+        Interp.Interp.Load();
 
         foreach (var api in ApiChain())
-        {
             try
             {
 #if ANDROID
-                var viewOptions = ViewOptions.Default with
+                var options = ViewOptions.Default with
                 {
                     API = api,
-                    VSync = ConfigManager.View.VSync,
+                    VSync = DisplayOptions.VSync,
                 };
-                _window = Silk.NET.Windowing.Window.GetView(viewOptions);
+                _window = Silk.NET.Windowing.Window.GetView(options);
 #else
                 var options = WindowOptions.Default with
                 {
                     Size = new Vector2D<int>(1280, 720),
                     Title = title,
-                    VSync = ConfigManager.View.VSync,
+                    VSync = DisplayOptions.VSync,
                     UpdatesPerSecond = 0,
                     FramesPerSecond = 0,
-                    WindowState = ConfigManager.View.Fullscreen ? WindowState.Fullscreen : WindowState.Normal,
-                    API = api,
+                    WindowState = DisplayOptions.Fullscreen ? WindowState.Fullscreen : WindowState.Normal,
+                    API = api
                 };
                 _window = Silk.NET.Windowing.Window.Create(options);
 #endif
-                FrameClock.VSync = ConfigManager.View.VSync;
+                FrameClock.VSync = DisplayOptions.VSync;
+                Interp.Interp.VSync = DisplayOptions.VSync;
+                Interp.Interp.RefreshRate = QueryRefreshRate();
+                Console.WriteLine($"[Host] monitor refresh: {Interp.Interp.RefreshRate} hz");
                 _window.Load += OnLoad;
                 _window.Render += OnRender;
                 _window.Closing += OnClosing;
@@ -141,10 +180,10 @@ public static class HostWindow
             }
             catch (Exception e)
             {
-                Console.Error.WriteLine($"[Host] context {api.Version.MajorVersion}.{api.Version.MinorVersion} unavailable: {e.Message}");
+                Console.Error.WriteLine(
+                    $"[Host] context {api.Version.MajorVersion}.{api.Version.MinorVersion} unavailable: {e.Message}");
                 _window = null;
             }
-        }
 
         Console.Error.WriteLine("[Host] no usable gl context were found");
         _headless = true;
@@ -153,23 +192,30 @@ public static class HostWindow
     public static string Title
     {
         get => (_window as IWindow)?.Title ?? "";
-        set { if (_window is IWindow w) w.Title = value ?? ""; }
+        set
+        {
+            if (_window is IWindow w) w.Title = value ?? "";
+        }
     }
 
-    public static void SetTitle(string title) => Title = title;
+    public static void SetTitle(string title)
+    {
+        Title = title;
+    }
 
-    static Silk.NET.Core.RawImage? _pendingIcon;
+    private static Silk.NET.Core.RawImage? _pendingIcon;
 
     public static void SetIcon(byte[] data)
     {
         try
         {
-            var rgba = Decode(data, out int w, out int h);
+            var rgba = Decode(data, out var w, out var h);
             if (rgba == null)
             {
                 Console.Error.WriteLine("[Host] icon format not supported");
                 return;
             }
+
             SetIcon(rgba, w, h);
         }
         catch (Exception e)
@@ -195,11 +241,17 @@ public static class HostWindow
     {
         _pendingIcon = null;
         if (_window is not IWindow w) return;
-        try { w.SetWindowIcon(ReadOnlySpan<Silk.NET.Core.RawImage>.Empty); }
-        catch (Exception e) { Console.Error.WriteLine($"[Host] failed to clear icon: {e.Message}"); }
+        try
+        {
+            w.SetWindowIcon(ReadOnlySpan<Silk.NET.Core.RawImage>.Empty);
+        }
+        catch (Exception e)
+        {
+            Console.Error.WriteLine($"[Host] failed to clear icon: {e.Message}");
+        }
     }
 
-    static void Apply(Silk.NET.Core.RawImage image)
+    private static void Apply(Silk.NET.Core.RawImage image)
     {
         if (_window is not IWindow w) return;
         try
@@ -213,7 +265,7 @@ public static class HostWindow
         }
     }
 
-    static byte[]? Decode(byte[] data, out int width, out int height)
+    private static byte[]? Decode(byte[] data, out int width, out int height)
     {
         width = height = 0;
         if (data.Length < 4) return null;
@@ -232,28 +284,28 @@ public static class HostWindow
         return img.Data;
     }
 
-    static byte[]? LargestIcoEntry(byte[] ico)
+    private static byte[]? LargestIcoEntry(byte[] ico)
     {
         int count = BitConverter.ToUInt16(ico, 4);
-        int bestArea = -1;
+        var bestArea = -1;
         byte[]? best = null;
 
-        for (int i = 0; i < count; i++)
+        for (var i = 0; i < count; i++)
         {
-            int e = 6 + i * 16;
+            var e = 6 + i * 16;
             if (e + 16 > ico.Length) break;
 
-            int w = ico[e] == 0 ? 256 : ico[e];
-            int h = ico[e + 1] == 0 ? 256 : ico[e + 1];
-            int size = BitConverter.ToInt32(ico, e + 8);
-            int offset = BitConverter.ToInt32(ico, e + 12);
+            var w = ico[e] == 0 ? 256 : ico[e];
+            var h = ico[e + 1] == 0 ? 256 : ico[e + 1];
+            var size = BitConverter.ToInt32(ico, e + 8);
+            var offset = BitConverter.ToInt32(ico, e + 12);
             if (size <= 0 || offset < 0 || offset + size > ico.Length) continue;
 
-            bool png = size > 8 && ico[offset] == 0x89 && ico[offset + 1] == 0x50 &&
-                       ico[offset + 2] == 0x4E && ico[offset + 3] == 0x47;
+            var png = size > 8 && ico[offset] == 0x89 && ico[offset + 1] == 0x50 &&
+                      ico[offset + 2] == 0x4E && ico[offset + 3] == 0x47;
             if (!png) continue;
 
-            int area = w * h;
+            var area = w * h;
             if (area <= bestArea) continue;
             bestArea = area;
             best = ico.AsSpan(offset, size).ToArray();
@@ -266,31 +318,99 @@ public static class HostWindow
     {
         _gpu = gpu;
         if (_headless || _window == null) return;
-        try { _window.DoEvents(); }
-        catch (Exception e) {
+        try
+        {
+            _window.DoEvents();
+        }
+        catch (Exception e)
+        {
             Console.WriteLine(e.Message);
         }
-        if (_window.IsClosing) { Runtime.Shutdown(); Environment.Exit(0); }
+
+        if (_window.IsClosing)
+        {
+            Runtime.Shutdown();
+            Environment.Exit(0);
+        }
+
         InputManager.Poll();
-        if (InputManager.ConsumeTopBarToggle())
-        {
-            ConfigManager.View.HideTopBar = !ConfigManager.View.HideTopBar;
-            ConfigManager.SaveView(PanelManager.Panels);
-        }
-        if (InputManager.ConsumeFullscreenToggle())
-        {
-            ConfigManager.View.Fullscreen = !ConfigManager.View.Fullscreen;
-            SetFullscreen(ConfigManager.View.Fullscreen);
-            ConfigManager.SaveView(PanelManager.Panels);
-        }
+        HandleShortcuts();
+
         _window.DoRender();
+        FrameClock.MarkPresent();
     }
 
+    public static bool Ready => !_headless && _window != null;
+    
+    public static void PumpEvents()
+    {
+        if (_headless || _window == null) return;
+        
+        try
+        {
+            _window.DoEvents();
+        }
+        catch (Exception e)
+        {
+            Console.WriteLine(e.Message);
+        }
+        
+        if (_window.IsClosing)
+        {
+            Runtime.Shutdown();
+            Environment.Exit(0);
+        }
+        
+        InputManager.Poll();
+        
+        HandleShortcuts();
+    }
+
+    private static void HandleShortcuts()
+    {
+        if (InputManager.ConsumeTopBarToggle())
+            InterfaceOptions.HideMenuBar.Value = !InterfaceOptions.HideMenuBar;
+
+        if (InputManager.ConsumeFullscreenToggle())
+        {
+            DisplayOptions.Fullscreen.Value = !DisplayOptions.Fullscreen;
+            SetFullscreen(DisplayOptions.Fullscreen);
+        }
+    }
+    
+    public static void Compose(Gpu? gpu, bool counts = true)
+    {
+        _gpu = gpu;
+        if (_headless || _window == null) return;
+        
+        try
+        {
+            _window.DoRender();
+        }
+        catch (NotImplementedException) //doesnt fucking work
+        {
+        }
+        
+        if (counts) FrameClock.MarkPresent();
+    }
+    
     internal static void Pump()
     {
         if (_headless || _window == null) return;
-        try { _window.DoEvents(); } catch { }
-        if (_window.IsClosing) { Runtime.Shutdown(); Environment.Exit(0); }
+        try
+        {
+            _window.DoEvents();
+        }
+        catch
+        {
+        }
+
+        if (_window.IsClosing)
+        {
+            Runtime.Shutdown();
+            Environment.Exit(0);
+        }
+
         _window.DoRender();
     }
 
@@ -308,12 +428,12 @@ public static class HostWindow
         if (on) SetAutoIconify(false);
     }
 
-    static unsafe void SetAutoIconify(bool on)
+    private static unsafe void SetAutoIconify(bool on)
     {
 #if !ANDROID
         try
         {
-            var handle = _window?.Native?.Glfw;
+            var handle = (_window as IWindow)?.Native?.Glfw;
             if (handle is not { } h) return;
             Silk.NET.GLFW.Glfw.GetApi().SetWindowAttrib(
                 (Silk.NET.GLFW.WindowHandle*)h,
@@ -326,7 +446,10 @@ public static class HostWindow
 #endif
     }
 
-    public static bool IsKeyDown(Key k) => InputManager.IsKeyDown(k);
+    public static bool IsKeyDown(Key k)
+    {
+        return InputManager.IsKeyDown(k);
+    }
 
     /// <summary>Number of attached pads the game can actually drive.</summary>
     public static int ConnectedPadCount => InputManager.Devices.Count;
@@ -345,34 +468,59 @@ public static class HostWindow
     /// <summary>Re-opens controllers now instead of waiting for the next device change.</summary>
     public static void RescanControllers() => InputManager.RefreshDevices();
 
-    public static void RequestDiscPath() => PopupManager.Open<DiscPickerPopup>();
+    public static void RequestDiscPath()
+    {
+        PopupManager.Open<DiscPickerPopup>();
+    }
 
     public static void WaitForValidDisc() // wait for disc path to be valid before running it!!
     {
         if (_headless || _window == null) return;
 
         while (StartupNoticePopup.NeedsAck)
-        {
-            try { _window.DoEvents(); } catch { }
-            if (_window.IsClosing) { Runtime.Shutdown(); Environment.Exit(0); }
-            InputManager.Poll();
-            _window.DoRender();
-        }
+            HandOverFrame();
 
         while (true)
         {
-            var path = ConfigManager.Game.CdPath;
+            var path = Settings.System.DiscPath;
             if (!string.IsNullOrWhiteSpace(path) && File.Exists(path) && Runtime.ValidateDisc(path) == null)
                 return;
 
-            try { _window.DoEvents(); } catch { }
-            if (_window.IsClosing) { Runtime.Shutdown(); Environment.Exit(0); }
-            InputManager.Poll();
-            _window.DoRender();
+            HandOverFrame();
         }
     }
+    
+    private static void HandOverFrame()
+    {
+        var closing = false;
 
-    static void OnLoad()
+        GpuJobs.Run(() =>
+        {
+            try
+            {
+                _window!.DoEvents();
+            }
+            catch
+            {
+            }
+
+            if (_window!.IsClosing)
+            {
+                closing = true;
+                return;
+            }
+
+            InputManager.Poll();
+            _window.DoRender();
+        });
+
+        if (!closing) return;
+
+        Runtime.Shutdown();
+        Environment.Exit(0);
+    }
+
+    private static void OnLoad()
     {
         var input = _window!.CreateInput();
         InputManager.Initialize(input);
@@ -386,25 +534,34 @@ public static class HostWindow
         _gl.Viewport(0, 0, (uint)fb.X, (uint)fb.Y);
         _window.FramebufferResize += size => _gl?.Viewport(0, 0, (uint)size.X, (uint)size.Y);
         _displayTex = CreateTexture(_gl);
-        _vramTex= CreateTexture(_gl);
+        _vramTex = CreateTexture(_gl);
         _ramTex = CreateTexture(_gl);
 
-        Hle.GlVram.Scale = ConfigManager.View.RenderScale;
+        Hle.GlVram.Scale = DisplayOptions.RenderScale;
+        Hle.GlVram.TrueColor = DisplayOptions.TrueColor;
         _glBackend = (Hle.GlCore)Hle.GpuBackendFactory.Create(_gl,
-            Hle.GpuBackendFactory.Parse(ConfigManager.View.GpuBackend));
+            Hle.GpuBackendFactory.Parse(DisplayOptions.Backend));
         _glBackend.InitGl();
         Hle.GpuHle.Active = _glBackend.Ready;
+#if ANDROID
+        // The Android host drives Entry.Run directly rather than Runtime.Run's interpolated
+        // present loop, so the backend presents from the same thread that runs the game.
         Hle.GpuHle.Backend = _glBackend;
+#else
+        Hle.GpuHle.Backend = new Interp.InterpBackend(_glBackend);
+#endif
+        ApplySwapInterval();
 
         try
         {
-            _imgui = new ImGuiController(_gl, _window, input, null, ConfigureImGui);
+            _imgui = new ImGuiController(_gl, _window, input, ConfigureImGui);
         }
         catch (Exception e)
         {
             Console.Error.WriteLine($"[Host] ImGui initialization skipped: {e.Message}");
             _imgui = null;
         }
+        Interp.InterpOptions.TargetFps.Changed += _ => ApplySwapInterval();
 
         PanelManager.Register(new OutputPanel());
         PanelManager.Register(new VramViewerPanel());
@@ -414,32 +571,40 @@ public static class HostWindow
         PanelManager.Register(new MemoryEditorPanel());
         PanelManager.Register(new SpuViewerPanel());
         PanelManager.Register(new CdDebugPanel());
+        PanelManager.Register(new InterpDebugPanel());
         PanelManager.Register(new ConsolePanel());
         PanelManager.Register(new OverlayEventsPanel());
+        PanelManager.Register(new AssetPackEditor());
 
         PopupManager.Register(new SettingsPopup());
         PopupManager.Register(new ModsPopup());
+        PopupManager.Register(new ModHubPopup());
+        PopupManager.Register(new AssetPacksPopup());
+        PopupManager.Register(new NewPackPopup());
+        PopupManager.Register(new ConfirmPopup());
         PopupManager.Register(new ModLoadingPopup());
         PopupManager.Register(new NoticePopup());
+        PopupManager.Register(new CrashPopup());
         PopupManager.Register(new StartupNoticePopup());
         PopupManager.Register(new DiscPickerPopup());
 
         MainMenuBar.RegisterBuiltins();
 
-        SettingsRegistry.Register(new InterfaceSettingsSection());
-        SettingsRegistry.Register(new InputSettingsSection());
-        SettingsRegistry.Register(new DisplaySettingsSection());
-        SettingsRegistry.Register(new PathsSettingsSection());
-        SettingsRegistry.Register(new AudioSettingsSection());
+        InterfacePage.Register();
+        LanguagePage.Register();
+        InputPage.Register();
+        DisplayPage.Register();
+        AudioPage.Register();
+        PathsPage.Register();
 
-        ConfigManager.ApplyViewToPanels(PanelManager.Panels);
+        InterfaceLayout.ApplyPanels(PanelManager.Panels);
 
-        var cdPath = ConfigManager.Game.CdPath;
+        var cdPath = Settings.System.DiscPath;
         if (string.IsNullOrWhiteSpace(cdPath) || !File.Exists(cdPath) || Runtime.ValidateDisc(cdPath) != null)
             PopupManager.Open<DiscPickerPopup>();
     }
 
-    static void ConfigureImGui()
+    private static void ConfigureImGui()
     {
         _dpiScale = QueryDpiScale();
         Console.WriteLine($"[Host] display scale: {_dpiScale:0.##}x");
@@ -447,8 +612,11 @@ public static class HostWindow
         var io = ImGui.GetIO();
         io.ConfigFlags |= ImGuiConfigFlags.DockingEnable;
         io.ConfigWindowsMoveFromTitleBarOnly = true;
-        io.FontGlobalScale = Config.ConfigManager.View.UiScale;
-        unsafe { io.NativePtr->IniFilename = null; }
+        io.FontGlobalScale = InterfaceOptions.Scale;
+        unsafe
+        {
+            io.NativePtr->IniFilename = null;
+        }
 
 #if !ANDROID
         // Android builds an ImGui context (OnRender still ticks it) but never draws a single
@@ -461,43 +629,84 @@ public static class HostWindow
         Localization.Load();
         Theme.Load();
 
-        if (Config.ConfigManager.ApplyImGuiLayout())
+        if (InterfaceLayout.ApplyImGui())
             _layoutPending = false;
 
-        if (ConfigManager.View.Fullscreen) SetAutoIconify(false);
+        if (DisplayOptions.Fullscreen) SetAutoIconify(false);
     }
 
     public static void SetVSync(bool on)
     {
         if (_window != null) _window.VSync = on;
         FrameClock.VSync = on;
+        Interp.Interp.VSync = on;
+        ApplySwapInterval();
         FrameClock.Resync();
     }
-
-    public enum AspectRatioMode
+    
+    public static void AdvanceFrame()
     {
-        AutoDevice = 0,     // Dynamic aspect fit for any device (Portrait & Landscape)
-        Original_4_3 = 1,   // 4:3 PSX ratio
-        Widescreen_16_9 = 2, // 16:9 widescreen
-        Stretch = 3         // Stretch fill
+        _glBackend?.AdvanceFrame();
     }
-
-    public static AspectRatioMode CurrentAspectRatio = AspectRatioMode.AutoDevice;
-    public static volatile bool PendingGpuBackendReset = true;
-
-    public static void RequestGpuReset()
+    
+    public static void RefreshVSync()
     {
-        PendingGpuBackendReset = true;
+        ApplySwapInterval();
     }
-
-    static uint _directVao, _directVbo, _directProg;
-    static int _uDirectTex;
-
-    static float _directUMax = 1.0f;
-
-    // The aspect the game actually rendered this frame, as reported by the backend. Widescreen
-    // makes the frame genuinely wider, so presenting it against a fixed ratio would squash it.
-    static float _directAspect = 4f / 3f;
+    
+    private static void ApplySwapInterval()
+    {
+        if (_headless || _window == null) return;
+        
+        var refresh = QueryRefreshRate();
+        if (refresh > 0 && refresh != Interp.Interp.RefreshRate)
+        {
+            Interp.Interp.RefreshRate = refresh;
+            Console.WriteLine($"[Host] monitor refresh: {refresh} hz");
+        }
+        
+        var target = Features.FrameInterpolation ? Interp.InterpOptions.TargetFps.Value : 0;
+        var divisor = target > 0 && refresh > target && refresh % target == 0 ? refresh / target : 1;
+        var interval = Interp.Interp.VSync ? -divisor : 0;
+        if (!SetSwapInterval(interval)) interval = SetSwapInterval(divisor) ? divisor : 0;
+        
+        Console.WriteLine($"[Host] swap interval: {interval}" +
+                          (interval < 0 ? " (adaptive)" : ""));
+    }
+    
+    private static bool SetSwapInterval(int interval)
+    {
+        try
+        {
+            Silk.NET.GLFW.Glfw.GetApi().SwapInterval(interval);
+            return true;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+    
+    private static unsafe int QueryRefreshRate()
+    {
+        try
+        {
+            var glfw = Silk.NET.GLFW.Glfw.GetApi();
+            var monitor = glfw.GetPrimaryMonitor();
+            if (monitor == null) return 0;
+            
+            var mode = glfw.GetVideoMode(monitor);
+            if (mode == null) return 0;
+            
+            var rate = mode->RefreshRate;
+            return rate is > 0 and <= 1000 ? rate : 0;
+        }
+        catch (Exception e)
+        {
+            Console.WriteLine($"[Host] cant read refresh rate: {e.Message}");
+            return 0;
+        }
+    }
 
     static unsafe void RenderDirectDisplay(GL gl, int screenW, int screenH, uint overrideTex = 0, float uMax = 1.0f, float contentAspect = 0f)
     {
@@ -630,75 +839,97 @@ public static class HostWindow
         gl.BindVertexArray(0);
     }
 
-    static void OnRender(double dt)
+    private static void OnRender(double dt)
     {
         var gl = _gl!;
         if (_imgui != null)
         {
             try { _imgui.Update((float)dt); } catch { _imgui = null; }
         }
+        Autohide.Update();
 
         if (PendingGpuBackendReset)
         {
             PendingGpuBackendReset = false;
             try
             {
-                Hle.GlVram.Scale = ConfigManager.View.RenderScale;
+                Hle.GlVram.Scale = DisplayOptions.RenderScale;
                 _glBackend?.Dispose();
                 _glBackend = (Hle.GlCore)Hle.GpuBackendFactory.Create(gl,
-                    Hle.GpuBackendFactory.Parse(ConfigManager.View.GpuBackend));
+                    Hle.GpuBackendFactory.Parse(DisplayOptions.Backend));
                 _glBackend.InitGl();
                 Hle.GpuHle.Active = _glBackend.Ready;
+#if ANDROID
                 Hle.GpuHle.Backend = _glBackend;
+#else
+                Hle.GpuHle.Backend = new Interp.InterpBackend(_glBackend);
+#endif
             }
             catch (Exception e)
             {
                 Console.Error.WriteLine($"[Host] GPU backend reset failed: {e.Message}");
             }
         }
-    
+
         gl.BindFramebuffer(FramebufferTarget.Framebuffer, 0);
         var fbDef = _window!.FramebufferSize;
         gl.Viewport(0, 0, (uint)fbDef.X, (uint)fbDef.Y);
-        var clear = Window.Theme.Background;
+        var clear = Theme.Background;
         gl.ClearColor(clear.X, clear.Y, clear.Z, 1f);
         gl.Clear(ClearBufferMask.ColorBufferBit);
 
         Runtime.RamLog.Tick();
+        Settings.SaveIfDue();
+        ToolUi.Pump(); //update thread state
+        Assets.AssetReplacerManager.Instance.Pump();
         Memory.RamLogger.TrackReads =
             PanelManager.Get<RamMapPanel>()?.IsOpen == true ||
             PanelManager.Get<MemoryEditorPanel>()?.IsOpen == true;
+        Memory.RamLogger.TrackWrites = Memory.RamLogger.TrackReads;
 
         var gpu = _gpu;
-        var glBackend = Hle.GpuHle.Backend as Hle.GlCore;
         uint directTex = 0;
+        float directAspect = 4f / 3f;
         if (gpu != null)
         {
-            if (Hle.GpuHle.Active && glBackend is { Ready: true })
+#if ANDROID
+            var display = new Interp.DisplayState(gpu.DisplayX, gpu.DisplayY,
+                gpu.DisplayWidth > 0 ? gpu.DisplayWidth : 320,
+                gpu.DisplayHeight > 0 ? gpu.DisplayHeight : 240,
+                gpu.Display24Bit, gpu.DisplayEnabled);
+#else
+            var display = new Interp.DisplayState(gpu.DisplayX, gpu.DisplayY, gpu.DisplayWidth, gpu.DisplayHeight,
+                gpu.Display24Bit, gpu.DisplayEnabled);
+#endif
+            var backend = Interp.Interp.Backend;
+            var recorded = default(Interp.DisplayState);
+            var shown = backend != null && backend.TryShownDisplay(out recorded) &&
+                        (recorded.Width != display.Width || recorded.Height != display.Height ||
+                         recorded.Rgb24 != display.Rgb24 || recorded.Enabled != display.Enabled);
+            if (shown) display = recorded;
+
+            if (Hle.GpuHle.Active && _glBackend is { Ready: true } && display.Enabled)
             {
                 var wf = _window!.FramebufferSize;
-                int dispW = gpu.DisplayWidth > 0 ? gpu.DisplayWidth : 320;
-                int dispH = gpu.DisplayHeight > 0 ? gpu.DisplayHeight : 240;
-                var (tex, tw, th, aspect, uMax) = glBackend.PresentDisplay(
-                    gpu.DisplayX, gpu.DisplayY,
-                    dispW, dispH,
-                    gpu.Display24Bit,
-                    outW: wf.X, outH: wf.Y);
+                var dispX = display.X;
+                var dispY = display.Y;
+                if (!shown) backend?.MapDisplay(ref dispX, ref dispY, display.Width, display.Height);
+                var (tex, tw, th, aspect) = _glBackend.PresentDisplay(
+                    dispX, dispY,
+                    display.Width, display.Height,
+                    display.Rgb24,
+                    OutputPanel.ViewWidth, OutputPanel.ViewHeight);
                 if (tex != 0)
                 {
-                    OutputPanel.SetTexture(tex, tw, th, aspect, uMax);
+                    OutputPanel.SetTexture(tex, tw, th, aspect);
                     directTex = tex;
-                    _directUMax = uMax;
-                    // Widescreen renders a wider frame, and this is the only place that knows
-                    // how wide it came out.
-                    _directAspect = aspect > 0f ? aspect : 4f / 3f;
+                    directAspect = aspect > 0f ? aspect : 4f / 3f;
                 }
                 else
                 {
                     UploadDisplayTexture(gl, gpu);
                     directTex = OutputPanel.TextureId;
-                    _directUMax = 1.0f;
-                    _directAspect = Hle.GpuHle.OutputAspect;
+                    directAspect = Hle.GpuHle.OutputAspect;
                 }
                 gl.BindFramebuffer(FramebufferTarget.Framebuffer, 0);
                 gl.Viewport(0, 0, (uint)wf.X, (uint)wf.Y);
@@ -707,7 +938,7 @@ public static class HostWindow
             {
                 UploadDisplayTexture(gl, gpu);
                 directTex = OutputPanel.TextureId;
-                _directAspect = Hle.GpuHle.OutputAspect;
+                directAspect = Hle.GpuHle.OutputAspect;
             }
 
             if (PanelManager.Get<VramViewerPanel>()?.IsOpen == true)
@@ -721,35 +952,32 @@ public static class HostWindow
         }
 
 #if ANDROID
-        RenderDirectDisplay(gl, fbDef.X, fbDef.Y, directTex, _directUMax, _directAspect);
+        RenderDirectDisplay(gl, fbDef.X, fbDef.Y, directTex, 1f, directAspect);
 #else
-        if (_imgui != null)
-        {
-            if (!ConfigManager.View.HideTopBar)
-                MainMenuBar.Draw();
+        var overlay = Autohide.BarOverlay;
+        if (!overlay && Autohide.BarVisible)
+            MainMenuBar.Draw();
 
-            DrawDockspace();
-            PanelManager.DrawPanels();
-            PopupManager.Draw();
-            gl.BindFramebuffer(FramebufferTarget.Framebuffer, 0);
-            gl.Viewport(0, 0, (uint)fbDef.X, (uint)fbDef.Y);
-            try { _imgui.Render(); } catch { _imgui = null; }
-        }
-        else
-        {
-            RenderDirectDisplay(gl, fbDef.X, fbDef.Y, directTex, _directUMax, _directAspect);
-        }
+        DrawDockspace(overlay);
+        PanelManager.DrawPanels();
+        if (overlay && Autohide.BarVisible)
+            MainMenuBar.Draw();
+        PopupManager.Draw();
+        gl.BindFramebuffer(FramebufferTarget.Framebuffer, 0);
+        gl.Viewport(0, 0, (uint)fbDef.X, (uint)fbDef.Y);
+        _imgui?.Render();
 #endif
     }
 
-    static void DrawDockspace()
+    private static void DrawDockspace(bool overlay)
     {
         var viewport = ImGui.GetMainViewport();
-        ImGui.SetNextWindowPos(viewport.WorkPos);
-        ImGui.SetNextWindowSize(viewport.WorkSize);
+        var area = overlay ? viewport.Size : viewport.WorkSize;
+        ImGui.SetNextWindowPos(overlay ? viewport.Pos : viewport.WorkPos);
+        ImGui.SetNextWindowSize(area);
         ImGui.SetNextWindowViewport(viewport.ID);
 
-        const ImGuiWindowFlags hostFlags = ImGuiWindowFlags.NoDocking | 
+        const ImGuiWindowFlags hostFlags = ImGuiWindowFlags.NoDocking |
                                            ImGuiWindowFlags.NoTitleBar |
                                            ImGuiWindowFlags.NoCollapse |
                                            ImGuiWindowFlags.NoResize |
@@ -762,8 +990,8 @@ public static class HostWindow
         ImGui.PushStyleVar(ImGuiStyleVar.WindowPadding, Vector2.Zero);
         ImGui.Begin("##DockHost", hostFlags);
         ImGui.PopStyleVar(3);
-        uint dockId = ImGui.GetID("##MainDock");
-        int openCount = PanelManager.Panels.Count(p => p.IsOpen && p is not IFloatingPanel);
+        var dockId = ImGui.GetID("##MainDock");
+        var openCount = PanelManager.Panels.Count(p => p.IsOpen && p is not IFloatingPanel);
         var dockFlags = openCount <= 1 ? (ImGuiDockNodeFlags)4096 : ImGuiDockNodeFlags.None;
         ImGui.DockSpace(dockId, Vector2.Zero, dockFlags);
 
@@ -777,18 +1005,18 @@ public static class HostWindow
             _layoutPending = false;
             _redockCooldown = RedockCooldownFrames;
             if (PanelManager.Get<OutputPanel>() is { } output)
-                DockBuilder.SetupCenterLayout(dockId, viewport.WorkSize, output.Title());
+                DockBuilder.SetupCenterLayout(dockId, area, output.Title());
         }
 
         ImGui.End();
     }
 
-    static void OnClosing()
+    private static void OnClosing()
     {
         if (_closed) return;
         _closed = true;
-        ConfigManager.SaveView(PanelManager.Panels);
-        ConfigManager.SaveGame();
+        InterfaceLayout.Save(PanelManager.Panels);
+        Settings.SaveIfDirty();
         PanelManager.Shutdown();
         PopupManager.Shutdown();
         _glBackend?.Dispose();
@@ -808,21 +1036,24 @@ public static class HostWindow
             int w = img.Width, h = img.Height;
             if (w == h) return UploadTexture(img.Data, w, h);
 
-            int s = Math.Min(w, h);
-            int ox = (w - s) / 2;
-            int oy = (h - s) / 2;
+            var s = Math.Min(w, h);
+            var ox = (w - s) / 2;
+            var oy = (h - s) / 2;
             var square = new byte[s * s * 4];
-            for (int y = 0; y < s; y++)
+            for (var y = 0; y < s; y++)
                 Array.Copy(img.Data, ((oy + y) * w + ox) * 4, square, y * s * 4, s * 4);
             return UploadTexture(square, s, s);
         }
-        catch { return 0; }
+        catch
+        {
+            return 0;
+        }
     }
 
     public static uint UploadTexture(byte[] rgba, int width, int height)
     {
         if (_gl == null || width <= 0 || height <= 0) return 0;
-        int needed = width * height * 4;
+        var needed = width * height * 4;
         if (rgba.Length < needed) return 0;
         var tex = CreateTexture(_gl);
         _gl.BindTexture(TextureTarget.Texture2D, tex);
@@ -831,7 +1062,7 @@ public static class HostWindow
         return tex;
     }
 
-    static uint CreateTexture(GL gl)
+    private static uint CreateTexture(GL gl)
     {
         var tex = gl.GenTexture();
         gl.BindTexture(TextureTarget.Texture2D, tex);
@@ -842,35 +1073,22 @@ public static class HostWindow
         return tex;
     }
 
-    static byte[] _rgbaDisplay = Array.Empty<byte>();
-
-    static void UploadDisplayTexture(GL gl, Gpu gpu)
+    private static void UploadDisplayTexture(GL gl, Gpu gpu)
     {
         int w = gpu.DisplayWidth, h = gpu.DisplayHeight;
         if (!gpu.DisplayEnabled || w <= 0 || h <= 0) return;
-        int neededRgb = w * h * 3;
-        if (_rgbDisplay.Length < neededRgb) _rgbDisplay = new byte[neededRgb];
+        var needed = w * h * 3;
+        if (_rgbDisplay.Length < needed) _rgbDisplay = new byte[needed];
         ConvertDisplay(gpu, w, h);
-
-        int neededRgba = w * h * 4;
-        if (_rgbaDisplay.Length < neededRgba) _rgbaDisplay = new byte[neededRgba];
-
-        for (int i = 0, j = 0; i < neededRgb; i += 3, j += 4)
-        {
-            _rgbaDisplay[j]     = _rgbDisplay[i];
-            _rgbaDisplay[j + 1] = _rgbDisplay[i + 1];
-            _rgbaDisplay[j + 2] = _rgbDisplay[i + 2];
-            _rgbaDisplay[j + 3] = 255;
-        }
-
         gl.BindTexture(TextureTarget.Texture2D, _displayTex);
-        gl.TexImage2D<byte>(TextureTarget.Texture2D, 0, InternalFormat.Rgba, (uint)w, (uint)h, 0,
-            PixelFormat.Rgba, PixelType.UnsignedByte, _rgbaDisplay.AsSpan(0, neededRgba));
+        gl.TexImage2D<byte>(TextureTarget.Texture2D, 0, InternalFormat.Rgb, (uint)w, (uint)h, 0,
+            PixelFormat.Rgb, PixelType.UnsignedByte, _rgbDisplay.AsSpan(0, needed));
         OutputPanel.SetTexture(_displayTex, w, h);
     }
 
-    static ushort[] _vramView = new ushort[Gpu.VramWidth * Gpu.VramHeight];
-    static void UploadVramTexture(GL gl, Gpu gpu)
+    private static ushort[] _vramView = new ushort[Gpu.VramWidth * Gpu.VramHeight];
+
+    private static void UploadVramTexture(GL gl, Gpu gpu)
     {
         const int sz = Gpu.VramWidth * Gpu.VramHeight * 3;
         if (_rgbVram.Length < sz) _rgbVram = new byte[sz];
@@ -880,14 +1098,19 @@ public static class HostWindow
             _glBackend.ReadVram(0, 0, Gpu.VramWidth, Gpu.VramHeight, _vramView);
             src = _vramView;
         }
-        else src = gpu.Vram;
+        else
+        {
+            src = gpu.Vram;
+        }
+
         ConvertVramToBuffer(src, _rgbVram);
         gl.BindTexture(TextureTarget.Texture2D, _vramTex);
-        gl.TexImage2D<byte>(TextureTarget.Texture2D, 0, InternalFormat.Rgb, Gpu.VramWidth, Gpu.VramHeight, 0, PixelFormat.Rgb, PixelType.UnsignedByte, _rgbVram.AsSpan(0, sz));
+        gl.TexImage2D<byte>(TextureTarget.Texture2D, 0, InternalFormat.Rgb, Gpu.VramWidth, Gpu.VramHeight, 0,
+            PixelFormat.Rgb, PixelType.UnsignedByte, _rgbVram.AsSpan(0, sz));
         VramViewerPanel.SetTexture(_vramTex, Gpu.VramWidth, Gpu.VramHeight);
     }
 
-    static void QueueRamConvert()
+    private static void QueueRamConvert()
     {
         if (_ramTask is { IsCompleted: false }) return;
         if (++_ramFrame < 6) return;
@@ -904,7 +1127,7 @@ public static class HostWindow
             }, TaskContinuationOptions.ExecuteSynchronously);
     }
 
-    static void FlushRamTexture(GL gl)
+    private static void FlushRamTexture(GL gl)
     {
         _ramReady = false;
         gl.BindTexture(TextureTarget.Texture2D, _ramTex);
@@ -914,58 +1137,54 @@ public static class HostWindow
         RamMapPanel.SetTexture(_ramTex);
     }
 
-    static void ConvertDisplay(Gpu gpu, int w, int h)
+    private static void ConvertDisplay(Gpu gpu, int w, int h)
     {
         var vram = gpu.Vram;
         int dx = gpu.DisplayX, dy = gpu.DisplayY;
-        int o = 0;
+        var o = 0;
         if (gpu.Display24Bit)
-        {
-            for (int y = 0; y < h; y++)
+            for (var y = 0; y < h; y++)
             {
-                int lineByte = ((dy + y) * Gpu.VramWidth + dx) * 2;
-                for (int x = 0; x < w; x++)
+                var lineByte = ((dy + y) * Gpu.VramWidth + dx) * 2;
+                for (var x = 0; x < w; x++)
                 {
-                    int bo = lineByte + x * 3;
+                    var bo = lineByte + x * 3;
                     _rgbDisplay[o++] = VramByte(vram, bo);
                     _rgbDisplay[o++] = VramByte(vram, bo + 1);
                     _rgbDisplay[o++] = VramByte(vram, bo + 2);
                 }
             }
-        }
         else
-        {
-            for (int y = 0; y < h; y++)
+            for (var y = 0; y < h; y++)
             {
-                int line = ((dy + y) & (Gpu.VramHeight - 1)) * Gpu.VramWidth;
-                for (int x = 0; x < w; x++)
+                var line = ((dy + y) & (Gpu.VramHeight - 1)) * Gpu.VramWidth;
+                for (var x = 0; x < w; x++)
                 {
-                    ushort px = vram[line + ((dx + x) & (Gpu.VramWidth - 1))];
+                    var px = vram[line + ((dx + x) & (Gpu.VramWidth - 1))];
                     _rgbDisplay[o++] = (byte)((px & 0x1F) << 3);
                     _rgbDisplay[o++] = (byte)(((px >> 5) & 0x1F) << 3);
                     _rgbDisplay[o++] = (byte)(((px >> 10) & 0x1F) << 3);
                 }
             }
-        }
     }
 
-    static void ConvertVramToBuffer(ushort[] vram, byte[] output)
+    private static void ConvertVramToBuffer(ushort[] vram, byte[] output)
     {
-        int o = 0;
-        for (int y = 0; y < Gpu.VramHeight; y++)
-        for (int x = 0; x < Gpu.VramWidth; x++)
+        var o = 0;
+        for (var y = 0; y < Gpu.VramHeight; y++)
+        for (var x = 0; x < Gpu.VramWidth; x++)
         {
-            ushort px = vram[y * Gpu.VramWidth + x];
+            var px = vram[y * Gpu.VramWidth + x];
             output[o++] = (byte)((px & 0x1F) << 3);
             output[o++] = (byte)(((px >> 5) & 0x1F) << 3);
             output[o++] = (byte)(((px >> 10) & 0x1F) << 3);
         }
     }
 
-    static byte VramByte(ushort[] vram, int byteOffset)
+    private static byte VramByte(ushort[] vram, int byteOffset)
     {
-        int hw = (byteOffset >> 1) & (Gpu.VramWidth * Gpu.VramHeight - 1);
-        ushort v = vram[hw];
+        var hw = (byteOffset >> 1) & (Gpu.VramWidth * Gpu.VramHeight - 1);
+        var v = vram[hw];
         return (byte)((byteOffset & 1) == 0 ? v & 0xFF : v >> 8);
     }
 }
