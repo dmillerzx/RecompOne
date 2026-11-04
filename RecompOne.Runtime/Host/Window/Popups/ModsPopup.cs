@@ -68,7 +68,7 @@ public sealed class ModsPopup : Popup
         float rightX = origin.X + avail;
         float textX = origin.X + IconSize + 12f;
 
-        bool showGear = mod.Loaded && mod.HasSettings;
+        bool showGear = mod.Loaded && (mod.HasSettings || mod.HasOptions);
         float controlsW = ToggleW + Gap + SmallBtn + (showGear ? Gap + SmallBtn : 0f);
 
         bool dim = !mod.Enabled;
@@ -147,12 +147,14 @@ public sealed class ModsPopup : Popup
 
         ImGui.SetCursorPos(bottom);
 
-        if (_settingsFor == mod.Info.Id && mod.Loaded && mod.HasSettings)
+        if (_settingsFor == mod.Info.Id && mod.Loaded && (mod.HasSettings || mod.HasOptions))
         {
             ImGui.Spacing();
             ImGui.Separator();
             ImGui.Spacing();
-            mod.DrawSettings();
+            // Declared options first, then any hand-rolled ImGui the mod also wants.
+            if (mod.HasOptions) ModOptionsImGui.Draw(mod.Options());
+            if (mod.HasSettings) mod.DrawSettings();
             ImGui.Spacing();
         }
 

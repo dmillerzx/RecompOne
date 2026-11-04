@@ -17,6 +17,8 @@ public sealed class ModEntry
     public int HookCount;
     public byte[]? IconData;
     public bool HasSettings { get; internal set; }
+    /// <summary>True when any instance implements <see cref="IModOptions"/>.</summary>
+    public bool HasOptions { get; internal set; }
     public string? LoadError { get; internal set; }
     internal bool IsZip;
     internal List<(string Path, string Text)> Sources = [];
@@ -30,6 +32,30 @@ public sealed class ModEntry
             try { inst.DrawSettings(); }
             catch (Exception ex) { Console.Error.WriteLine($"[Mods] {Info.Id}: DrawSettings threw: {ex.Message}"); }
         }
+    }
+
+    /// <summary>
+    /// Every option this mod declares, across all its <see cref="IMod"/> instances. Hosts draw
+    /// these in their own idiom - ImGui on desktop, MenuSheet rows on Android - so a mod does
+    /// not have to know where it is running to be configurable.
+    /// </summary>
+    public IReadOnlyList<ModOption> Options()
+    {
+        var all = new List<ModOption>();
+        foreach (var inst in Instances)
+        {
+            if (inst is not IModOptions provider) continue;
+            try
+            {
+                var opts = provider.GetOptions();
+                if (opts != null) all.AddRange(opts);
+            }
+            catch (Exception ex)
+            {
+                Console.Error.WriteLine($"[Mods] {Info.Id}: GetOptions threw: {ex.Message}");
+            }
+        }
+        return all;
     }
 }
 
@@ -475,6 +501,7 @@ public static class ModLoader
             mod.HookCount = RegisterHooks(mod.Info, asm);
             mod.Instances = CreateInstances(mod.Info, asm);
             mod.HasSettings = mod.Instances.Any(OverridesDrawSettings);
+            mod.HasOptions = mod.Instances.Any(i => i is IModOptions);
             mod.LoadError = null;
             mod.Alc = alc;
             mod.Loaded = true;
@@ -510,6 +537,7 @@ public static class ModLoader
             mod.Instances = [];
             mod.HookCount = 0;
             mod.HasSettings = false;
+            mod.HasOptions = false;
             mod.Loaded = false;
             mod.Alc?.Unload();
             mod.Alc = null;
