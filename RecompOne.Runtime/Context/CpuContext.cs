@@ -42,6 +42,82 @@ public struct CpuSnapshot
     public uint EPC;
     public uint BadVAddr;
     public uint PRId;
+
+    public uint this[int index]
+    {
+        get => index switch
+        {
+            1 => At,
+            2 => V0,
+            3 => V1,
+            4 => A0,
+            5 => A1,
+            6 => A2,
+            7 => A3,
+            8 => T0,
+            9 => T1,
+            10 => T2,
+            11 => T3,
+            12 => T4,
+            13 => T5,
+            14 => T6,
+            15 => T7,
+            16 => S0,
+            17 => S1,
+            18 => S2,
+            19 => S3,
+            20 => S4,
+            21 => S5,
+            22 => S6,
+            23 => S7,
+            24 => T8,
+            25 => T9,
+            26 => K0,
+            27 => K1,
+            28 => GP,
+            29 => SP,
+            30 => FP,
+            31 => RA,
+            _ => 0u
+        };
+        set
+        {
+            switch (index)
+            {
+                case 1: At = value; break;
+                case 2: V0 = value; break;
+                case 3: V1 = value; break;
+                case 4: A0 = value; break;
+                case 5: A1 = value; break;
+                case 6: A2 = value; break;
+                case 7: A3 = value; break;
+                case 8: T0 = value; break;
+                case 9: T1 = value; break;
+                case 10: T2 = value; break;
+                case 11: T3 = value; break;
+                case 12: T4 = value; break;
+                case 13: T5 = value; break;
+                case 14: T6 = value; break;
+                case 15: T7 = value; break;
+                case 16: S0 = value; break;
+                case 17: S1 = value; break;
+                case 18: S2 = value; break;
+                case 19: S3 = value; break;
+                case 20: S4 = value; break;
+                case 21: S5 = value; break;
+                case 22: S6 = value; break;
+                case 23: S7 = value; break;
+                case 24: T8 = value; break;
+                case 25: T9 = value; break;
+                case 26: K0 = value; break;
+                case 27: K1 = value; break;
+                case 28: GP = value; break;
+                case 29: SP = value; break;
+                case 30: FP = value; break;
+                case 31: RA = value; break;
+            }
+        }
+    }
 }
 
 public sealed class CpuContext
