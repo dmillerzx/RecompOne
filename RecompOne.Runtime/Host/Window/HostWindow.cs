@@ -844,9 +844,16 @@ public static class HostWindow
         var gl = _gl!;
         if (_imgui != null)
         {
-            try { _imgui.Update((float)dt); } catch { _imgui = null; }
+            try
+            {
+                _imgui.Update((float)dt);
+                Autohide.Update();
+            }
+            catch
+            {
+                _imgui = null;
+            }
         }
-        Autohide.Update();
 
         if (PendingGpuBackendReset)
         {

@@ -320,7 +320,9 @@ public static class Runtime
 
 #if ANDROID
         // The Android host drives the game from SilkActivity and never enters Run's
-        // PresentLoop, so this is the only place a frame reaches the screen there.
+        // PresentLoop, so this is the only place a frame reaches the screen there. The
+        // desktop loop advances the backend scene before composing; mirror that here.
+        HostWindow.AdvanceFrame();
         HostWindow.Present(Gpu);
 #endif
 
