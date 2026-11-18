@@ -1687,6 +1687,15 @@ public sealed class GlCore : IGpuBackend
         var filter = nearest ? GLEnum.Nearest : GLEnum.Linear;
         _gl.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureMinFilter, (int)filter);
         _gl.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureMagFilter, (int)filter);
+
+        // Reallocating the texture invalidates the FBO attachment on GLES/Adreno: without
+        // reattaching, the present framebuffer is FramebufferIncompleteMissingAttachment and
+        // every present draw is silently discarded, leaving a black screen.
+        _gl.BindFramebuffer(FramebufferTarget.Framebuffer, _presentFbo);
+        _gl.FramebufferTexture2D(FramebufferTarget.Framebuffer, FramebufferAttachment.ColorAttachment0,
+            TextureTarget.Texture2D, _presentTex, 0);
+        _gl.BindFramebuffer(FramebufferTarget.Framebuffer, 0);
+
         _presentW = w;
         _presentH = h;
         _presentNearest = nearest;

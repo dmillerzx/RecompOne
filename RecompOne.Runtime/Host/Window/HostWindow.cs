@@ -938,6 +938,7 @@ public static class HostWindow
                     directTex = OutputPanel.TextureId;
                     directAspect = Hle.GpuHle.OutputAspect;
                 }
+
                 gl.BindFramebuffer(FramebufferTarget.Framebuffer, 0);
                 gl.Viewport(0, 0, (uint)wf.X, (uint)wf.Y);
             }

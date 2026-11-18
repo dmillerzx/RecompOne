@@ -624,7 +624,11 @@ internal static class GlShaders
         {
             src = src.Replace("#version 330 core", "#version 300 es\nprecision highp float;\nprecision highp int;")
                      .Replace("layout(location = 0, index = 0) out vec4 FragColor;", "out vec4 FragColor;")
-                     .Replace("layout(location = 0, index = 1) out vec4 BlendColor;", "");
+                     .Replace("layout(location = 0, index = 1) out vec4 BlendColor;", "")
+                     // "noperspective" is a reserved word in GLSL ES 3.00 and the driver
+                     // refuses the whole shader. ES has no equivalent interpolation
+                     // qualifier, so fall back to the default smooth interpolation.
+                     .Replace("noperspective ", "");
 
             // GLES 3.0 has no dual-source blending, so the alpha channel has to carry the
             // blend factor for BlendFunc(SrcAlpha, OneMinusSrcAlpha). Every "BlendColor = x;"
