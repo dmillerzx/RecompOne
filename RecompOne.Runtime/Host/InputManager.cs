@@ -12,8 +12,11 @@ using EvMouseButton = RecompOne.Runtime.Events.MouseButton;
 
 namespace RecompOne.Runtime.Host;
 
-internal static unsafe class InputManager
+public static unsafe class InputManager
 {
+    public static Action? OnMenuRequested;
+    private static bool _prevMenuChord;
+
     private static IKeyboard? _keyboard;
     private static IMouse? _mouse;
     private static Sdl? _sdl;
@@ -158,6 +161,20 @@ internal static unsafe class InputManager
             var bind = Settings.System.Input[0].Gamepad;
             (Controller.LeftX, Controller.LeftY) = Stick(_pad0, bind.LeftStickX, bind.LeftStickY);
             (Controller.RightX, Controller.RightY) = Stick(_pad0, bind.RightStickX, bind.RightStickY);
+
+            if (_sdl != null)
+            {
+                bool back = _sdl.GameControllerGetButton(_pad0, GameControllerButton.Back) != 0;
+                bool start = _sdl.GameControllerGetButton(_pad0, GameControllerButton.Start) != 0;
+                bool guide = _sdl.GameControllerGetButton(_pad0, GameControllerButton.Guide) != 0;
+                bool r3 = _sdl.GameControllerGetButton(_pad0, GameControllerButton.Rightstick) != 0;
+                bool chord = guide || (back && start) || r3;
+                if (chord && !_prevMenuChord)
+                {
+                    OnMenuRequested?.Invoke();
+                }
+                _prevMenuChord = chord;
+            }
         }
 
         if (_pad1 != null)

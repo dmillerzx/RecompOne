@@ -107,7 +107,7 @@ internal static class GlShaders
                                  layout(location = 4) in vec2  inUV;
                                  layout(location = 5) in float inW;
 
-                                 noperspective out vec4 vColor;
+                                 out vec4 vColor;
                                  out vec2 vUV;
                                  flat out ivec2 clutBase;
                                  flat out ivec2 pageBase;
@@ -150,7 +150,7 @@ internal static class GlShaders
 
     public const string PrimFs = """
                                  #version 330 core
-                                 noperspective in vec4 vColor;
+                                 in vec4 vColor;
                                  in vec2 vUV;
                                  flat in ivec2 clutBase;
                                  flat in ivec2 pageBase;
@@ -624,7 +624,8 @@ internal static class GlShaders
         {
             src = src.Replace("#version 330 core", "#version 300 es\nprecision highp float;\nprecision highp int;")
                      .Replace("layout(location = 0, index = 0) out vec4 FragColor;", "out vec4 FragColor;")
-                     .Replace("layout(location = 0, index = 1) out vec4 BlendColor;", "");
+                     .Replace("layout(location = 0, index = 1) out vec4 BlendColor;", "")
+                     .Replace("noperspective ", "");
 
             // GLES 3.0 has no dual-source blending, so the alpha channel has to carry the
             // blend factor for BlendFunc(SrcAlpha, OneMinusSrcAlpha). Every "BlendColor = x;"

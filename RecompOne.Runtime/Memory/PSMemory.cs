@@ -111,6 +111,9 @@ public sealed class PSMemory : IMemory
             Runtime.RamLog.RecordRead(phys & _ramMask, size);
     }
 
+    private readonly byte[] _dummyBuffer = new byte[4096];
+    private static readonly HashSet<uint> _reportedUnmapped = [];
+
     private Span<byte> Resolve(uint address, int size)
     {
         var phys = MemoryMap.ToPhysical(address);
@@ -122,7 +125,10 @@ public sealed class PSMemory : IMemory
         {
             var off = (int)(phys - MemoryMap.ScratchpadBase);
             if (off + size > MemoryMap.ScratchpadWindow)
+            {
+                if (OperatingSystem.IsAndroid()) return _dummyBuffer.AsSpan(0, Math.Min(size, _dummyBuffer.Length));
                 throw new InvalidOperationException($"access crossing the end of the scratchpad: 0x{address:X8}");
+            }
             return _scratchpad.AsSpan(off, size);
         }
 
@@ -131,6 +137,25 @@ public sealed class PSMemory : IMemory
 
         if (phys >= MemoryMap.BiosBase && phys < MemoryMap.BiosBase + MemoryMap.BiosSize)
             return _bios.AsSpan((int)(phys - MemoryMap.BiosBase), size);
+
+        if (OperatingSystem.IsAndroid())
+        {
+            // Law 27: Suppress unmapped memory access fault on Android handheld console
+            lock (_reportedUnmapped)
+            {
+                if (_reportedUnmapped.Add(address & 0xFFFFFF00u))
+                {
+                    Console.WriteLine($"[PSMemory] Warning: unmapped address access: 0x{address:X8} (phys=0x{phys:X8})");
+                    Console.WriteLine(new System.Diagnostics.StackTrace(1, false));
+                }
+            }
+            if (size <= _dummyBuffer.Length)
+            {
+                _dummyBuffer.AsSpan(0, size).Clear();
+                return _dummyBuffer.AsSpan(0, size);
+            }
+            return new byte[size];
+        }
 
         throw new InvalidOperationException($"unmapped address: 0x{address:X8}");
     }

@@ -524,15 +524,15 @@ public static class BiosA
             case 0x43: c.V0 = DoExec(c, m, c.A0, c.A1, c.A2); break;
             case 0x44: break;
             case 0x45: break;
-            case 0x46:
-            case 0x47:
-            case 0x48:
-            case 0x49:
-            case 0x4A:
-            case 0x4B:
+            case 0x46: Runtime.Gpu?.WriteGp0(c.A0); break;
+            case 0x47: break;
+            case 0x48: Runtime.Gpu?.WriteGp1(c.A0); break;
+            case 0x49: Runtime.Gpu?.WriteGp0(c.A0); break;
+            case 0x4A: break;
+            case 0x4B: break;
             case 0x4C: break;
-            case 0x4D: c.V0 = 0u; break;
-            case 0x4E: break;
+            case 0x4D: c.V0 = Runtime.Gpu?.ReadStat() ?? 0u; break;
+            case 0x4E: c.V0 = 0u; break;
             case 0x51:
             {
                 if (DoLoad(m, c.A0, ExecHeaderScratch, true) == 0u)

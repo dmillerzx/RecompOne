@@ -18,6 +18,10 @@ public static class Dispatcher
     {
         _registry[name] = overlay;
         if (overlay.LbaStart >= 0) _lbaToName[overlay.LbaStart] = name;
+        if (name.Equals("st0", StringComparison.OrdinalIgnoreCase))
+        {
+            _lbaToName[37113] = name; // SEL.BIN stage table alias for ST0
+        }
     }
 
     public static string[] ActiveNames
@@ -242,6 +246,7 @@ public static class Dispatcher
 
     public static void Call(CpuContext c, IMemory m, uint addr)
     {
+
         if (BiosKernel.TryDispatch(c, m, addr)) return;
 
         if (_funcMap.TryGetValue(addr, out var fn))
@@ -256,14 +261,66 @@ public static class Dispatcher
             fn(c, m);
             return;
         }
-        
+
         if (IsReturnSite(m, addr)) return;
 
-        if (!Tolerant) throw new InvalidOperationException($"unmapped call: 0x{addr:X8}");
+        // Check if any registered overlay contains this function and load it on-demand
+        // Guard: Do not on-demand swap another overlay if it collides with an already active resident overlay
+        foreach (var (name, overlay) in _registry)
+        {
+            if (overlay.Functions.TryGetValue(addr, out fn) ||
+                (cached != addr && overlay.Functions.TryGetValue(cached, out fn)))
+            {
+                lock (_active)
+                {
+                    if (!_active.Contains(name))
+                    {
+                        bool baseCollides = false;
+                        foreach (var a in _active)
+                        {
+                            if (_registry.TryGetValue(a, out var activeOvl) &&
+                                activeOvl.Base != 0 && activeOvl.Base == overlay.Base)
+                            {
+                                baseCollides = true;
+                                break;
+                            }
+                        }
+
+                        if (baseCollides)
+                        {
+                            Console.WriteLine($"[Dispatcher] Skipping on-demand load of '{name}' at 0x{addr:X8} to prevent clobbering active overlay");
+                            continue;
+                        }
+                    }
+                }
+
+                Console.WriteLine($"[Dispatcher] On-demand loading overlay '{name}' for function 0x{addr:X8}");
+                Load(name);
+                fn(c, m);
+                return;
+            }
+        }
+
+
+        if (IsReturnSite(m, addr)) return;
 
         lock (_reported)
             if (_reported.Add(addr))
-                Console.WriteLine($"[Dispatcher] skipped an unmapped call to 0x{addr:X8}");
+            {
+                Console.WriteLine($"[Dispatcher] Warning: unmapped call: 0x{addr:X8} from RA=0x{c.RA:X8}");
+                Console.WriteLine(new System.Diagnostics.StackTrace(1, true).ToString());
+            }
+
+        if (!Tolerant)
+        {
+#if ANDROID
+            // Law 27: Suppress unmapped fatal crash on Android handheld console
+            c.V0 = 0u;
+            return;
+#else
+            throw new InvalidOperationException($"unmapped call: 0x{addr:X8}");
+#endif
+        }
 
         c.V0 = 0u;
     }

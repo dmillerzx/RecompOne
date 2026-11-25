@@ -67,6 +67,7 @@ public sealed class GlCore : IGpuBackend
     }
 
     private uint _vao, _vbo, _presentVao, _presentVbo, _progPrim, _progPresent, _progPresent24;
+    private static int _diagCounter;
     private uint _presentFbo, _presentTex;
     private int _presentW, _presentH;
     private bool _presentNearest;
@@ -1007,7 +1008,7 @@ public sealed class GlCore : IGpuBackend
         }
     }
 
-    public void Flush()
+    public unsafe void Flush()
     {
         if (_count == 0) return;
         UploadImages();
@@ -1118,6 +1119,22 @@ public sealed class GlCore : IGpuBackend
         var surface = !_legacy && _kDepth && ShaderMaterials.IsSurface(_kMaterial);
         if (_uSurface >= 0) _gl.Uniform1(_uSurface, surface ? 1 : 0);
         _gl.BindVertexArray(_vao);
+#if ANDROID
+        _gl.BindBuffer(BufferTargetARB.ArrayBuffer, _vbo);
+        var stride = (uint)sizeof(GlVertex);
+        _gl.EnableVertexAttribArray(0);
+        _gl.VertexAttribPointer(0, 2, VertexAttribPointerType.Float, false, stride, (void*)0);
+        _gl.EnableVertexAttribArray(1);
+        _gl.VertexAttribPointer(1, 3, VertexAttribPointerType.Float, false, stride, (void*)8);
+        _gl.EnableVertexAttribArray(2);
+        _gl.VertexAttribPointer(2, 1, VertexAttribPointerType.Float, false, stride, (void*)20);
+        _gl.EnableVertexAttribArray(3);
+        _gl.VertexAttribPointer(3, 1, VertexAttribPointerType.Float, false, stride, (void*)24);
+        _gl.EnableVertexAttribArray(4);
+        _gl.VertexAttribPointer(4, 2, VertexAttribPointerType.Float, false, stride, (void*)28);
+        _gl.EnableVertexAttribArray(5);
+        _gl.VertexAttribPointer(5, 1, VertexAttribPointerType.Float, false, stride, (void*)36);
+#endif
         _gl.ActiveTexture(TextureUnit.Texture0);
         _gl.BindTexture(TextureTarget.Texture2D, _vram.Texture);
         _gl.ActiveTexture(TextureUnit.Texture1);
@@ -1418,7 +1435,9 @@ public sealed class GlCore : IGpuBackend
         _gl.Disable(EnableCap.ScissorTest);
         _gl.Disable(EnableCap.CullFace);
 
-        _gl.UseProgram(rgb24 ? _progPresent24 : _progPresent);
+        var prog = rgb24 ? _progPresent24 : _progPresent;
+        _gl.UseProgram(prog);
+        _gl.Uniform1(_gl.GetUniformLocation(prog, "uVram"), 0);
         _gl.BindVertexArray(_presentVao);
 #if ANDROID
         _gl.BindBuffer(BufferTargetARB.ArrayBuffer, _presentVbo);
@@ -1439,8 +1458,9 @@ public sealed class GlCore : IGpuBackend
         else if (src != null)
         {
 #if ANDROID
-            _gl.Uniform2(_uPresentOrigin, 0f, 0f);
-            _gl.Uniform2(_uPresentSize, (float)src.Wide1x, src.H);
+            var offY = Math.Clamp((dispY & 0xFF) - (src.Y & 0xFF), 0, Math.Max(0, src.H - h1x));
+            _gl.Uniform2(_uPresentOrigin, 0f, (float)offY);
+            _gl.Uniform2(_uPresentSize, (float)w1x, h1x);
             _gl.Uniform2(_uPresentTexSize, (float)src.Wide1x, src.H);
 #else
             _gl.Uniform2(_uPresentOrigin, (float)(dispX - src.X), dispY - src.Y);
@@ -1457,8 +1477,8 @@ public sealed class GlCore : IGpuBackend
 
         _gl.DrawArrays(PrimitiveType.TriangleStrip, 0, 4);
 #if ANDROID
-        _gl.DisableVertexAttribArray(0);
         _gl.BindBuffer(BufferTargetARB.ArrayBuffer, 0);
+        _gl.BindVertexArray(0);
 #endif
 
         var outTex = _presentTex;
@@ -1687,6 +1707,18 @@ public sealed class GlCore : IGpuBackend
         var filter = nearest ? GLEnum.Nearest : GLEnum.Linear;
         _gl.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureMinFilter, (int)filter);
         _gl.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureMagFilter, (int)filter);
+        _gl.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureWrapS, (int)GLEnum.ClampToEdge);
+        _gl.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureWrapT, (int)GLEnum.ClampToEdge);
+
+        _gl.BindFramebuffer(FramebufferTarget.Framebuffer, _presentFbo);
+        _gl.FramebufferTexture2D(FramebufferTarget.Framebuffer, FramebufferAttachment.ColorAttachment0,
+            TextureTarget.Texture2D, _presentTex, 0);
+        var status = _gl.CheckFramebufferStatus(FramebufferTarget.Framebuffer);
+        if (status != GLEnum.FramebufferComplete)
+        {
+            Console.WriteLine($"[GlDiag] _presentFbo incomplete: {status}");
+        }
+
         _presentW = w;
         _presentH = h;
         _presentNearest = nearest;

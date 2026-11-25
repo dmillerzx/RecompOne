@@ -19,7 +19,7 @@ public static class DisplayOptions
     public static readonly Option<bool> Fullscreen = Options.Bool("display.fullscreen");
     public static readonly Option<bool> VSync = Options.Bool("display.vsync");
 
-    public static readonly Option<int> RenderScale = Options.Int("display.render_scale", 4)
+    public static readonly Option<int> RenderScale = Options.Int("display.render_scale", OperatingSystem.IsAndroid() ? 2 : 4)
         .Normalized(static v => Math.Clamp(v, 1, 8));
 
     public static readonly Option<string> Backend = Options.String("display.backend", "auto");

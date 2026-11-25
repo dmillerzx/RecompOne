@@ -194,9 +194,12 @@ public static class LibGpu
         var hEnd = hStart + (scrW != 0 ? scrW * 10 : 2560);
         var vEnd = vStart + (scrH != 0 ? scrH : 240);
         hStart = Math.Clamp(hStart, 500, 3290);
-        hEnd = Math.Clamp(hEnd, hStart + 0x50, 3290);
-        vStart = Math.Clamp(vStart, 0x10, pal ? 310 : 256);
-        vEnd = Math.Clamp(vEnd, vStart + 2, pal ? 312 : 258);
+        var minHEnd = Math.Min(hStart + 0x50, 3290);
+        hEnd = Math.Clamp(hEnd, minHEnd, 3290);
+        var maxV = pal ? 312 : 258;
+        vStart = Math.Clamp(vStart, 0x10, maxV);
+        var minVEnd = Math.Min(vStart + 2, maxV);
+        vEnd = Math.Clamp(vEnd, minVEnd, maxV);
         gpu.WriteGp1(0x06000000u | (((uint)hEnd & 0xFFF) << 12) | ((uint)hStart & 0xFFF));
         gpu.WriteGp1(0x07000000u | (((uint)vEnd & 0x3FF) << 10) | ((uint)vStart & 0x3FF));
 

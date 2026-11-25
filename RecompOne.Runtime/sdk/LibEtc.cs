@@ -58,7 +58,7 @@ public static class LibEtc
         return (uint)((Interrupts.ClockMs - _lastVSyncMs) * HblankHz / 1000.0) & 0xFFFF;
     }
 
-    private const double SleepMarginMs = 2.0;
+    private const double SleepMarginMs = 4.0;
 
     private static void WaitVBlanks(CpuContext c, IMemory m, int count)
     {

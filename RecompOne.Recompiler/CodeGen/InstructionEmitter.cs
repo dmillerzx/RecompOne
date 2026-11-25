@@ -230,7 +230,6 @@ public static class InstructionEmitter
 
     private static string UnknownInstr(MipsInstruction i, string desc)
     {
-        Console.WriteLine($"[Unknown] {desc} word=0x{i.Word:X8} @ 0x{i.Vram:X8}");
         return $"/* UNKOWN OP {desc} word=0x{i.Word:X8} @ 0x{i.Vram:X8} */";
     }
 

@@ -29,8 +29,23 @@ public sealed class Gl33Vram : IGlVram
         _stageFbo = CreateFbo(_stageTex);
         _destVramTex = CreateTex(GlVram.Width, GlVram.Height);
         _destVramFbo = CreateFbo(_destVramTex);
+#if ANDROID
+        ClearFbo(_fbo);
+        ClearFbo(_stageFbo);
+        ClearFbo(_destVramFbo);
+#endif
         _gl.BindFramebuffer(FramebufferTarget.Framebuffer, 0);
     }
+
+#if ANDROID
+    private void ClearFbo(uint fbo)
+    {
+        _gl.BindFramebuffer(FramebufferTarget.Framebuffer, fbo);
+        _gl.Disable(EnableCap.ScissorTest);
+        _gl.ClearColor(0f, 0f, 0f, 0f);
+        _gl.Clear(ClearBufferMask.ColorBufferBit);
+    }
+#endif
 
     private uint CreateTex(int w, int h)
     {
@@ -42,8 +57,8 @@ public sealed class Gl33Vram : IGlVram
         _gl.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureWrapS, (int)GLEnum.ClampToEdge);
         _gl.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureWrapT, (int)GLEnum.ClampToEdge);
 #if ANDROID
-        _gl.TexImage2D<ushort>(TextureTarget.Texture2D, 0, InternalFormat.Rgb5A1, (uint)w, (uint)h, 0,
-            PixelFormat.Rgba, PixelType.UnsignedShort5551, new ushort[w * h].AsSpan());
+        _gl.TexImage2D(TextureTarget.Texture2D, 0, InternalFormat.Rgba8, (uint)w, (uint)h, 0,
+            PixelFormat.Rgba, PixelType.UnsignedByte, (ReadOnlySpan<byte>)null);
 #else
         _gl.TexImage2D<ushort>(TextureTarget.Texture2D, 0, GlVram.Storage, (uint)w, (uint)h, 0,
             PixelFormat.Rgba, PixelType.UnsignedShort1555Rev, new ushort[w * h].AsSpan());
@@ -120,6 +135,9 @@ public sealed class Gl33Vram : IGlVram
         if (_destRtTex != 0) _gl.DeleteTexture(_destRtTex);
         _destRtTex = CreateTex(w, h);
         _destRtFbo = CreateFbo(_destRtTex);
+#if ANDROID
+        ClearFbo(_destRtFbo);
+#endif
         _destRtW = w;
         _destRtH = h;
     }
@@ -128,13 +146,14 @@ public sealed class Gl33Vram : IGlVram
     {
         _gl.BindFramebuffer(FramebufferTarget.Framebuffer, 0);
         _gl.BindTexture(TextureTarget.Texture2D, _stageTex);
-        _gl.PixelStore(PixelStoreParameter.UnpackAlignment, 2);
 #if ANDROID
-        var conv = new ushort[px.Length];
-        GlesColorHelper.Convert1555To5551(px, conv);
+        _gl.PixelStore(PixelStoreParameter.UnpackAlignment, 4);
+        var conv = new uint[px.Length];
+        GlesColorHelper.Convert1555ToRgba8(px, conv);
         _gl.TexSubImage2D(TextureTarget.Texture2D, 0, x, y, (uint)w, (uint)h,
-            PixelFormat.Rgba, PixelType.UnsignedShort5551, conv.AsSpan());
+            PixelFormat.Rgba, PixelType.UnsignedByte, conv.AsSpan());
 #else
+        _gl.PixelStore(PixelStoreParameter.UnpackAlignment, 2);
         _gl.TexSubImage2D(TextureTarget.Texture2D, 0, x, y, (uint)w, (uint)h,
             PixelFormat.Rgba, PixelType.UnsignedShort1555Rev, px);
 #endif
@@ -179,6 +198,7 @@ public sealed class Gl33Vram : IGlVram
 
     public void ReadRect(int x, int y, int w, int h, Span<ushort> dst)
     {
+        if (w <= 0 || h <= 0) return;
         var s = GlVram.Scale;
         _gl.Disable(EnableCap.ScissorTest);
         _gl.BindFramebuffer(FramebufferTarget.ReadFramebuffer, _fbo);
@@ -187,11 +207,13 @@ public sealed class Gl33Vram : IGlVram
             BlitFramebufferFilter.Nearest);
 
         _gl.BindFramebuffer(FramebufferTarget.ReadFramebuffer, _stageFbo);
-        _gl.PixelStore(PixelStoreParameter.PackAlignment, 2);
 #if ANDROID
-        _gl.ReadPixels(x, y, (uint)w, (uint)h, PixelFormat.Rgba, PixelType.UnsignedShort5551, dst);
-        GlesColorHelper.Convert5551To1555(dst, dst);
+        _gl.PixelStore(PixelStoreParameter.PackAlignment, 4);
+        var buf = new byte[w * h * 4];
+        _gl.ReadPixels(x, y, (uint)w, (uint)h, PixelFormat.Rgba, PixelType.UnsignedByte, buf.AsSpan());
+        GlesColorHelper.ConvertRgba8To1555(buf, dst.Slice(0, Math.Min(w * h, dst.Length)));
 #else
+        _gl.PixelStore(PixelStoreParameter.PackAlignment, 2);
         _gl.ReadPixels(x, y, (uint)w, (uint)h, PixelFormat.Rgba, PixelType.UnsignedShort1555Rev, dst);
 #endif
         _gl.BindFramebuffer(FramebufferTarget.Framebuffer, _fbo);

@@ -468,6 +468,12 @@ public static class HostWindow
     /// <summary>Re-opens controllers now instead of waiting for the next device change.</summary>
     public static void RescanControllers() => InputManager.RefreshDevices();
 
+    public static Action? OnMenuRequested
+    {
+        get => InputManager.OnMenuRequested;
+        set => InputManager.OnMenuRequested = value;
+    }
+
     public static void RequestDiscPath()
     {
         PopupManager.Open<DiscPickerPopup>();
@@ -708,11 +714,13 @@ public static class HostWindow
         }
     }
 
+    private static int _diagDirectCount;
     static unsafe void RenderDirectDisplay(GL gl, int screenW, int screenH, uint overrideTex = 0, float uMax = 1.0f, float contentAspect = 0f)
     {
         uint tex = overrideTex != 0 ? overrideTex : OutputPanel.TextureId;
         if (tex == 0) tex = _displayTex;
         if (tex == 0) tex = _vramTex;
+        if (tex == 0 && _glBackend is { Ready: true }) tex = _glBackend.PresentDisplay(0, 0, 320, 240, false).tex;
         if (tex == 0) return;
 
         float um = uMax > 0f ? uMax : _directUMax;
@@ -819,6 +827,7 @@ public static class HostWindow
 
         gl.BindFramebuffer(FramebufferTarget.Framebuffer, 0);
         gl.Viewport(0, 0, (uint)screenW, (uint)screenH);
+        gl.ColorMask(true, true, true, true);
         gl.ClearColor(0f, 0f, 0f, 1f);
         gl.Clear(ClearBufferMask.ColorBufferBit);
 
@@ -831,11 +840,18 @@ public static class HostWindow
         gl.UseProgram(_directProg);
         gl.BindVertexArray(_directVao);
 
+        gl.BindBuffer(BufferTargetARB.ArrayBuffer, _directVbo);
+        gl.EnableVertexAttribArray(0);
+        gl.VertexAttribPointer(0, 2, VertexAttribPointerType.Float, false, 4 * sizeof(float), (void*)0);
+        gl.EnableVertexAttribArray(1);
+        gl.VertexAttribPointer(1, 2, VertexAttribPointerType.Float, false, 4 * sizeof(float), (void*)(2 * sizeof(float)));
+
         gl.ActiveTexture(TextureUnit.Texture0);
         gl.BindTexture(TextureTarget.Texture2D, tex);
         gl.Uniform1(_uDirectTex, 0);
         gl.DrawArrays(PrimitiveType.TriangleStrip, 0, 4);
 
+        gl.BindBuffer(BufferTargetARB.ArrayBuffer, 0);
         gl.BindVertexArray(0);
     }
 
@@ -915,7 +931,11 @@ public static class HostWindow
                          recorded.Rgb24 != display.Rgb24 || recorded.Enabled != display.Enabled);
             if (shown) display = recorded;
 
+#if ANDROID
+            if (Hle.GpuHle.Active && _glBackend is { Ready: true })
+#else
             if (Hle.GpuHle.Active && _glBackend is { Ready: true } && display.Enabled)
+#endif
             {
                 var wf = _window!.FramebufferSize;
                 var dispX = display.X;
