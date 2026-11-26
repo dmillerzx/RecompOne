@@ -1710,6 +1710,9 @@ public sealed class GlCore : IGpuBackend
         _gl.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureWrapS, (int)GLEnum.ClampToEdge);
         _gl.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureWrapT, (int)GLEnum.ClampToEdge);
 
+        // Reallocating the texture invalidates the FBO attachment on GLES/Adreno: without
+        // reattaching, the present framebuffer is FramebufferIncompleteMissingAttachment and
+        // every present draw is silently discarded, leaving a black screen.
         _gl.BindFramebuffer(FramebufferTarget.Framebuffer, _presentFbo);
         _gl.FramebufferTexture2D(FramebufferTarget.Framebuffer, FramebufferAttachment.ColorAttachment0,
             TextureTarget.Texture2D, _presentTex, 0);
@@ -1718,6 +1721,7 @@ public sealed class GlCore : IGpuBackend
         {
             Console.WriteLine($"[GlDiag] _presentFbo incomplete: {status}");
         }
+        _gl.BindFramebuffer(FramebufferTarget.Framebuffer, 0);
 
         _presentW = w;
         _presentH = h;
